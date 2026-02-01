@@ -1,0 +1,7 @@
+﻿# Ignorar binarios
+*.iso
+*.exe
+*.zip
+*.vdi
+*.vmdk
+*.log
