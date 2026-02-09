@@ -61,3 +61,21 @@ validar_rango(){
     fi
 }
 
+preparar_servidor(){
+    local iface=$1
+    local ip_fija="192.168.100.20/24"
+
+    log_info "Asignando IP fija $ip_fija a la interfaz $iface..."
+
+    ip link set dev "$iface" up
+    ip addr flush dev "$iface"
+    ip addr add "$ip_fija" dev "$iface"
+
+    if ip_addr show "$iface" | grep -q "192.168.100.20"; then
+    log_ok "IP fija asignada correctamente."
+    else
+        log_error "Error al asignar la IP fija."
+        exit 1
+    fi
+
+}
