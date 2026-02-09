@@ -25,10 +25,17 @@ pausa() {
 }
 
 detectar_intefaz() {
-    local target_ip=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | head -n 1)
-    if [ -z "$target_ip" ]; then
-        target_ip=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | head -n 1)
+    local nat_iface=$(ip route show default | awk '{print $5}' | head -n1)
+
+    if [ -z "$nat_iface" ]; then
+        nat_iface="enp0s3"
     fi
+    local target_ip=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | grep -v "$nat_iface" | head -n 1)
+    
+    if [ -z "$target_ip" ]; then
+        target_ip="enp0s8"
+    fi
+    
     echo "$target_ip"
 }
 
@@ -71,7 +78,7 @@ preparar_servidor(){
     ip addr flush dev "$iface"
     ip addr add "$ip_fija" dev "$iface"
 
-    if ip_addr show "$iface" | grep -q "192.168.100.20"; then
+    if ip addr show "$iface" | grep -q "192.168.100.20"; then
     log_ok "IP fija asignada correctamente."
     else
         log_error "Error al asignar la IP fija."
