@@ -12,7 +12,7 @@ configurar(){
 
     INTERFACE=$(detectar_intefaz)
     log_info "Interfaz de red detectada: $INTERFACE"
-    preparar_interface "$INTERFACE"
+    preparar_servidor "$INTERFACE"
 
     echo "1) Automatico"
     echo "2) Manual"
