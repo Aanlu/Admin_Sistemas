@@ -1,3 +1,8 @@
+﻿[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::ResetColor()
+[Console]::Clear()
+
 $RutaScript = Split-Path $MyInvocation.MyCommand.Path
 . "$RutaScript\libs\Utils.ps1"
 
@@ -7,20 +12,21 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 function Configurar {
-    Clear-Host
+    [Console]::Clear()
+    $NombreAmbito = $null; $IPInicio = $null; $IPFin = $null; 
+    $PuertaEnlace = $null; $ServidorDNS = $null; $TiempoConcesion = $null
+
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "                 SERVIDOR DHCP (Windows)" -ForegroundColor Cyan
+    Write-Host "                 SERVIDOR DHCP " -ForegroundColor Cyan
     Write-Host "=================================================" -ForegroundColor Cyan
 
     $Interfaz = Get-InterfazInterna
-    
     if (-not $Interfaz) {
         log_error "No se detectó una interfaz de red interna adecuada."
-        Pausa
-        return
+        Pausa; return
     }
 
-    log_info "Interfaz de red detectada: $($Interfaz.Name)"
+    log_info "Interfaz detectada: $($Interfaz.Name)"
     Preparar-Red -InterfazAlias $Interfaz.Name
 
     Write-Host "1) Automatico"
@@ -28,66 +34,67 @@ function Configurar {
     $Opcion = Read-Host "Opción (1/2)"
 
     if ($Opcion -eq "1") {
-        log_info "Configuración automática seleccionada."
-        log_info "Cargando valores predeterminados..."
-        
+        log_info "Modo Automático."
         $NombreAmbito  = "Red_Sistemas"
         $IPInicio      = "192.168.100.50"
         $IPFin         = "192.168.100.150"
         $PuertaEnlace  = "192.168.100.1"
-        $ServidorDNS   = "192.168.100.20"
+        $ServidorDNS   = "192.168.100.10"
         $TiempoConcesion = New-TimeSpan -Seconds 600 
         Start-Sleep -Seconds 1
     } else {
-        log_info "Modo manual seleccionado."
-        $NombreAmbito = Read-Host "Ingrese el nombre del ámbito"
-
-        do {
-            $IPInicio = Read-Host "IP inicial del rango"
-        } until (Get-IPFormato $IPInicio)
-
-        do {
-            $IPFin = Read-Host "IP final del rango"
-        } until (Get-IPFormato $IPFin -and (Test-IPRango $IPInicio $IPFin))
-
+        log_info "Modo Manual."
+        $NombreAmbito = Read-Host "Nombre del Ámbito"
+        do { $IPInicio = Read-Host "IP Inicial" } until (Get-IPFormato $IPInicio)
+        do { $IPFin = Read-Host "IP Final" } until (Get-IPFormato $IPFin -and (Test-IPRango $IPInicio $IPFin))
         $PuertaEnlace = Read-Host "Gateway"
         $ServidorDNS = Read-Host "DNS"
-        $Segundos = Read-Host "Tiempo de concesión (segundos)"
+        $Segundos = Read-Host "Tiempo (segundos)"
         $TiempoConcesion = New-TimeSpan -Seconds ([int]$Segundos)
     }
+
+    # Calculamos la ID nosotros para usarla DESPUÉS en las opciones
+    $Octetos = $IPInicio.Split(".")
+    $ScopeID = "$($Octetos[0]).$($Octetos[1]).$($Octetos[2]).0"
 
     Write-Host ""
     log_info "Verificando dependencias..."
     
-    if (-not (Get-WindowsFeature -Name DHCP).Installed) {
-        Install-WindowsFeature DHCP -IncludeManagementTools | Out-Null
-        log_ok "[COMPLETADO] Servicio instalado correctamente."
-    } else {
-        log_ok "Servicio ya instalado."
-    }
+    if (-not (Get-WindowsFeature -Name DHCP).Installed) { Install-WindowsFeature DHCP -IncludeManagementTools | Out-Null }
+    if (-not (Get-WindowsFeature -Name DNS).Installed) { Install-WindowsFeature DNS -IncludeManagementTools | Out-Null }
 
-    log_info "Configurando el servicio DHCP..."
+    log_info "Configurando DHCP para red: $ScopeID ..."
 
     try {
-        if (Get-DhcpServerv4Scope -ScopeId 192.168.100.0 -ErrorAction SilentlyContinue) {
-            Remove-DhcpServerv4Scope -ScopeId 192.168.100.0 -Force
+        $ScopesViejos = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue
+        if ($ScopesViejos) {
+            $ScopesViejos | Remove-DhcpServerv4Scope -Force
         }
 
+        # CORRECCIÓN AQUÍ: Quitamos "-ScopeId $ScopeID" porque tu versión de Windows no lo soporta.
+        # Windows calculará la ID automáticamente basándose en la IP de inicio y máscara.
         Add-DhcpServerv4Scope -Name $NombreAmbito -StartRange $IPInicio -EndRange $IPFin -SubnetMask 255.255.255.0 -State Active -LeaseDuration $TiempoConcesion
-        Set-DhcpServerv4OptionValue -ScopeId 192.168.100.0 -OptionId 3 -Value $PuertaEnlace
-        Set-DhcpServerv4OptionValue -ScopeId 192.168.100.0 -OptionId 6 -Value $ServidorDNS
+        
+        # Aquí sí usamos la $ScopeID que calculamos manual, porque Set-Option lo requiere
+        Set-DhcpServerv4OptionValue -ScopeId $ScopeID -OptionId 3 -Value $PuertaEnlace
+        
+        try {
+            Set-DhcpServerv4OptionValue -ScopeId $ScopeID -OptionId 6 -Value $ServidorDNS -ErrorAction Stop
+        } catch {
+            Set-DhcpServerv4OptionValue -ScopeId $ScopeID -OptionId 6 -Value $ServidorDNS -ErrorAction SilentlyContinue
+        }
         
         Restart-Service dhcpserver
-        log_ok "Servicio reiniciado y configurado correctamente."
+        log_ok "Servidor configurado correctamente."
 
     } catch {
-        log_error "Error al configurar DHCP: $_"
+        log_error "Error crítico: $_"
     }
     Pausa
 }
 
 function Monitorear {
-    Clear-Host
+    [Console]::Clear()
     Write-Host "  --- Estado del Servidor ---" -ForegroundColor Cyan
     
     if ((Get-Service dhcpserver).Status -eq "Running") {
@@ -96,21 +103,41 @@ function Monitorear {
         log_error "Estado: Inactivo"
     }
 
-    Write-Host ""
-    Write-Host "  --- Clientes DHCP Actuales ---" -ForegroundColor Cyan
+    $ScopeInfo = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Select-Object -First 1
     
-    $Concesiones = Get-DhcpServerv4Lease -ScopeId 192.168.100.0 -ErrorAction SilentlyContinue
+    if ($ScopeInfo) {
+        # Obtenemos la ID real que Windows asignó
+        $ID = $ScopeInfo.ScopeId.IPAddressToString
 
-    if ($Concesiones) {
-        $Concesiones | Select-Object @{N='Direccion IP';E={$_.IPAddress}}, @{N='Direccion MAC';E={$_.ClientId}}, @{N='Nombre Host';E={$_.HostName}} | Format-Table -AutoSize
+        Write-Host "    --- DETALLES DEL ÁMBITO ($ID) ---" -ForegroundColor Yellow
+        Write-Host "Nombre:       $($ScopeInfo.Name)"
+        Write-Host "Rango:        $($ScopeInfo.StartRange) - $($ScopeInfo.EndRange)"
+        Write-Host "Máscara:      $($ScopeInfo.SubnetMask)"
+        Write-Host "Lease Time:   $($ScopeInfo.LeaseDuration)"
+        
+        $Gw = (Get-DhcpServerv4OptionValue -ScopeId $ID -OptionId 3 -ErrorAction SilentlyContinue).Value
+        $Dns = (Get-DhcpServerv4OptionValue -ScopeId $ID -OptionId 6 -ErrorAction SilentlyContinue).Value
+        
+        Write-Host "Gateway:      $Gw"
+        Write-Host "DNS:          $Dns"
+
+        Write-Host ""
+        Write-Host "  --- Clientes DHCP Actuales ---" -ForegroundColor Cyan
+        $Concesiones = Get-DhcpServerv4Lease -ScopeId $ID -ErrorAction SilentlyContinue
+
+        if ($Concesiones) {
+            $Concesiones | Select-Object @{N='IP Cliente';E={$_.IPAddress}}, @{N='MAC';E={$_.ClientId}}, @{N='Hostname';E={$_.HostName}} | Format-Table -AutoSize
+        } else {
+            Write-Host "No hay clientes conectados."
+        }
     } else {
-        Write-Host "No se han registrado clientes DHCP aún."
+        log_warning "No hay ámbitos configurados. Ejecuta la opción 1 primero."
     }
     Pausa
 }
 
 while ($true) {
-    Clear-Host
+    [Console]::Clear()
     Write-Host "=================================================" -ForegroundColor Cyan
     Write-Host "                 SERVIDOR DHCP" -ForegroundColor Cyan
     Write-Host "=================================================" -ForegroundColor Cyan
@@ -124,6 +151,6 @@ while ($true) {
         "1" { Configurar }
         "2" { Monitorear }
         "3" { log_info "Saliendo..."; exit }
-        default { log_error "Opción no válida. Intente nuevamente."; Start-Sleep -Seconds 1 }
+        default { log_error "Opción no válida."; Start-Sleep -Seconds 1 }
     }
 }
