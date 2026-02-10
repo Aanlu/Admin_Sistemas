@@ -7,10 +7,17 @@ source ./libs/utils.sh
 configurar(){
     clear
     echo "================================================="
-    echo "                  SERVIDOR DHCP"
+    echo "                SERVIDOR DHCP"
     echo "================================================="
 
     INTERFACE=$(detectar_intefaz)
+    
+    if [ -z "$INTERFACE" ]; then
+        log_error "No se detectó interfaz de red válida."
+        pausa
+        return
+    fi
+
     log_info "Interfaz de red detectada: $INTERFACE"
     preparar_servidor "$INTERFACE"
 
@@ -20,15 +27,14 @@ configurar(){
 
     if [ "$OP" == "1" ]; then
         log_info "Configuración automática seleccionada."
-        log_info "Cargando valores predeterminados..."
-
+        
         SCOPE="Red_Sistemas"
         IP_INICIAL="192.168.100.50"
         IP_FINAL="192.168.100.150"
         GW="192.168.100.1"
-        DNS=$(ip -o -4 addr show $INTERFACE | awk '{print $4}' | cut -d/ -f1)
-        [ -z "$DNS" ] && DNS="192.168.100.10"
+        DNS="192.168.100.20"
         LEASE_TIME="600"
+        
         sleep 1
     else
         log_info "Modo manual seleccionado."
@@ -36,17 +42,26 @@ configurar(){
 
         while true; do
             read -p "IP inicial del rango DHCP: " IP_INICIAL
-            validar_formato_ip "$IP_INICIAL" && break || log_error "Formato de IP no válido. Intente nuevamente."
+            validar_formato_ip "$IP_INICIAL" && break || log_error "Formato de IP inválido o reservado."
         done
 
         while true; do
             read -p "IP final del rango DHCP: " IP_FINAL
-            validar_formato_ip "$IP_FINAL" && validar_rango "$IP_INICIAL" "$IP_FINAL" && break || log_error "Formato de IP no válido o el rango no es correcto. Intente nuevamente."
+            validar_formato_ip "$IP_FINAL" && validar_rango "$IP_INICIAL" "$IP_FINAL" && break || log_error "IP inválida o rango incorrecto."
         done
 
-        read -p "Gateway: " GW
-        read -p "DNS: " DNS
+        while true; do
+            read -p "Gateway: " GW
+            validar_formato_ip "$GW" && break || log_error "IP inválida."
+        done
+
+        while true; do
+            read -p "DNS: " DNS
+            validar_formato_ip "$DNS" && break || log_error "IP inválida."
+        done
+        
         read -p "Tiempo de concesión (lease time) en segundos: " LEASE_TIME
+        [[ "$LEASE_TIME" =~ ^[0-9]+$ ]] || LEASE_TIME=600
     fi
 
     echo ""
@@ -54,13 +69,16 @@ configurar(){
     if ! dpkg -s isc-dhcp-server >/dev/null 2>&1; then
         apt-get update -qq >/dev/null 2>&1
         DEBIAN_FRONTEND=noninteractive apt-get install -y isc-dhcp-server -qq >/dev/null 2>&1
-        log_ok "[COMPLETADO]"
+        log_ok "[Instalación COMPLETADA]"
     else
         log_ok "Servicio ya instalado."
     fi
 
     log_info "Configurando el servicio DHCP..."
-    sed -i "s/INTERFACESv4=\"\"/INTERFACESv4=\"$INTERFACE\"/g" /etc/default/isc-dhcp-server
+    
+    sed -i "s/INTERFACESv4=.*/INTERFACESv4=\"$INTERFACE\"/g" /etc/default/isc-dhcp-server
+
+    [ ! -f /etc/dhcp/dhcpd.conf.bak ] && cp /etc/dhcp/dhcpd.conf /etc/dhcp/dhcpd.conf.bak
 
     cat > /etc/dhcp/dhcpd.conf <<EOL
 ddns-update-style none;
@@ -77,43 +95,59 @@ subnet 192.168.100.0 netmask 255.255.255.0 {
 EOL
 
     if systemctl restart isc-dhcp-server; then
-        log_ok "Servicio reiniciado correctamente."
+        log_ok "Servicio reiniciado y configurado correctamente."
     else
-        log_error "Error al reiniciar el servicio DHCP."
+        log_error "Error al iniciar el servicio. Verifique 'systemctl status isc-dhcp-server'."
+        cat /etc/dhcp/dhcpd.conf
     fi
     pausa
 }
 
 monitorear(){
-    clear
-    echo "  --- Estado del Servidor ---"
-    if systemctl is-active --quiet isc-dhcp-server; then
-        log_ok "Estado: Activo"
-    else
-        log_error "Estado: Inactivo"
-    fi
+    while true; do
+        clear
+        echo "   --- Estado del Servidor (Tiempo Real) ---"
+        echo "       [Presione 'x' para salir]"
+        echo ""
 
-    echo ""
-    echo "  --- Clientes DHCP Actuales ---"
-    echo -e "IP Address\tMAC Address\tHostname"
-    echo "---------------------------------------------"
-    if [ -f /var/lib/dhcp/dhcpd.leases ]; then
-        grep -E "lease |hardware ethernet|client-hostname" /var/lib/dhcp/dhcpd.leases | awk '{
-            if ($1=="lease") ip=$2;
-            if ($1=="hardware") mac=$3;
-            if ($1=="client-hostname") { name=$2; gsub(/[";]/, "", name); }
-            if ($1=="}") { if (ip && mac) print ip "\t" mac "\t" (name ? name : "N/A"); ip=""; mac=""; name=""; }
-        }' | sort | uniq
-    else 
-        echo "No se han registrado clientes DHCP aún."
-    fi
-    pausa
+        if systemctl is-active --quiet isc-dhcp-server; then
+            log_ok "Estado: Activo"
+        else
+            log_error "Estado: Inactivo"
+        fi
+
+        echo ""
+        echo "   --- Clientes DHCP Actuales ---"
+        echo -e "IP Address\tMAC Address\tHostname"
+        echo "---------------------------------------------"
+        
+        LEASE_FILE="/var/lib/dhcp/dhcpd.leases"
+        
+        if [ -f "$LEASE_FILE" ]; then
+            grep -E "lease |hardware ethernet|client-hostname" "$LEASE_FILE" | awk '{
+                if ($1=="lease") ip=$2;
+                if ($1=="hardware") mac=$3;
+                if ($1=="client-hostname") { name=$2; gsub(/[";]/, "", name); }
+                if ($1=="}") { 
+                    if (ip && mac) print ip "\t" mac "\t" (name ? name : "N/A"); 
+                    ip=""; mac=""; name=""; 
+                }
+            }' | sort | uniq
+        else 
+            echo "No se han registrado clientes DHCP aún."
+        fi
+        
+        read -t 2 -n 1 key
+        if [[ $key = "x" || $key = "X" ]]; then
+            break
+        fi
+    done
 }
 
 while true; do
     clear
     echo "================================================="
-    echo "                  SERVIDOR DHCP"
+    echo "                SERVIDOR DHCP"
     echo "================================================="
     echo "1) Configurar Servidor"
     echo "2) Monitorear Clientes"

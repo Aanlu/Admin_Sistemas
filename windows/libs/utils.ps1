@@ -38,23 +38,30 @@ function Get-InterfazInterna {
 
 function Get-IPFormato {
     param([string]$IP)
-    if ($IP -match "^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$"){
-        $Octetos = $IP.Split(".")
-        foreach ($Oct in $Octetos){
-            if ([int]$Oct -lt 0 -or [int]$Oct -gt 255) { return $false }
-        }
-        return $true
-    }
-    return $false
+    $IPAddress = $null
+    
+    if (-not [System.Net.IPAddress]::TryParse($IP, [ref]$IPAddress)) { return $false }
+
+    if ($IPAddress.ToString() -eq "0.0.0.0") { return $false }
+    if ($IPAddress.ToString() -eq "255.255.255.255"){ return $false }
+    if ($IPAddress.GetAddressBytes()[0] -ge 224) { return $false }
+    if ($IPAddress.GetAddressBytes()[0] -eq 127) { return $false }
+    
+    return $true
 }
 
 function Test-IPRango {
     param([string]$Inicio, [string]$Fin)
     try {
-        $UltInicio = [int]($Inicio.Split(".")[3])
-        $UltFin = [int]($Fin.Split(".")[3])
+        $OctInicio = $Inicio.Split(".")
+        $OctFin = $Fin.Split(".")
 
-        if ($UltFin -gt $UltInicio) { return $true }
+        if ("$($OctInicio[0]).$($OctInicio[1]).$($OctInicio[2])" -ne "$($OctFin[0]).$($OctFin[1]).$($OctFin[2])") {
+            log_error "Las IPs deben estar en el mismo segmento de red."
+            return $false
+        }
+
+        if ([int]$OctFin[3] -gt [int]$OctInicio[3]) { return $true }
     } catch {
         return $false
     }
@@ -77,138 +84,5 @@ function Preparar-Red {
     } catch {
         log_error "Error al asignar la IP fija: $_"
         exit
-    }
-}
-
-function Configurar {
-    [Console]::Clear()
-    $NombreAmbito = $null; $IPInicio = $null; $IPFin = $null; 
-    $PuertaEnlace = $null; $ServidorDNS = $null; $TiempoConcesion = $null
-
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "                SERVIDOR DHCP " -ForegroundColor Cyan
-    Write-Host "=================================================" -ForegroundColor Cyan
-
-    $Interfaz = Get-InterfazInterna
-    if (-not $Interfaz) {
-        log_error "No se detectó una interfaz de red interna adecuada."
-        Pausa; return
-    }
-
-    log_info "Interfaz detectada: $($Interfaz.Name)"
-    Preparar-Red -InterfazAlias $Interfaz.Name
-
-    Write-Host "1) Automatico"
-    Write-Host "2) Manual"
-    $Opcion = Read-Host "Opción (1/2)"
-
-    if ($Opcion -eq "1") {
-        log_info "Modo Automático."
-        $NombreAmbito  = "Red_Sistemas"
-        $IPInicio      = "192.168.100.50"
-        $IPFin         = "192.168.100.150"
-        $PuertaEnlace  = "192.168.100.1"
-        $ServidorDNS   = "192.168.100.10"
-        $TiempoConcesion = New-TimeSpan -Minutes 10
-    } else {
-        log_info "Modo Manual."
-        $NombreAmbito = Read-Host "Nombre del Ámbito"
-        do { $IPInicio = Read-Host "IP Inicial" } until (Get-IPFormato $IPInicio)
-        do { $IPFin = Read-Host "IP Final" } until (Get-IPFormato $IPFin -and (Test-IPRango $IPInicio $IPFin))
-        $PuertaEnlace = Read-Host "Gateway"
-        $ServidorDNS = Read-Host "DNS"
-        $Segundos = Read-Host "Tiempo (segundos)"
-        $TiempoConcesion = New-TimeSpan -Seconds ([int]$Segundos)
-    }
-
-    $Octetos = $IPInicio.Split(".")
-    $ScopeID = "$($Octetos[0]).$($Octetos[1]).$($Octetos[2]).0"
-
-    Write-Host ""
-    log_info "Verificando dependencias..."
-    
-    if (-not (Get-WindowsFeature -Name DHCP).Installed) { Install-WindowsFeature DHCP -IncludeManagementTools | Out-Null }
-    if (-not (Get-WindowsFeature -Name DNS).Installed) { Install-WindowsFeature DNS -IncludeManagementTools | Out-Null }
-
-    log_info "Configurando DHCP para red: $ScopeID ..."
-
-    try {
-        $ScopesViejos = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue
-        if ($ScopesViejos) {
-            $ScopesViejos | Remove-DhcpServerv4Scope -Force
-        }
-
-        Add-DhcpServerv4Scope -Name $NombreAmbito -StartRange $IPInicio -EndRange $IPFin -SubnetMask 255.255.255.0 -State Active -LeaseDuration $TiempoConcesion
-        
-        Set-DhcpServerv4OptionValue -ScopeId $ScopeID -OptionId 3 -Value $PuertaEnlace
-        Set-DhcpServerv4OptionValue -ScopeId $ScopeID -OptionId 6 -Value $ServidorDNS -Force -ErrorAction SilentlyContinue
-        
-        Restart-Service dhcpserver
-        log_ok "Servidor configurado correctamente."
-
-    } catch {
-        log_error "Error crítico: $_"
-    }
-    Pausa
-}
-
-function Monitorear {
-    [Console]::Clear()
-    Write-Host "   --- Estado del Servidor ---" -ForegroundColor Cyan
-    
-    if ((Get-Service dhcpserver).Status -eq "Running") {
-        log_ok "Estado: Activo"
-    } else {
-        log_error "Estado: Inactivo"
-    }
-
-    $ScopeInfo = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Select-Object -First 1
-    
-    if ($ScopeInfo) {
-        $ID = $ScopeInfo.ScopeId.IPAddressToString
-
-        Write-Host "    --- DETALLES DEL ÁMBITO ($ID) ---" -ForegroundColor Yellow
-        Write-Host "Nombre:       $($ScopeInfo.Name)"
-        Write-Host "Rango:        $($ScopeInfo.StartRange) - $($ScopeInfo.EndRange)"
-        Write-Host "Máscara:      $($ScopeInfo.SubnetMask)"
-        Write-Host "Lease Time:   $($ScopeInfo.LeaseDuration)"
-        
-        $Gw = (Get-DhcpServerv4OptionValue -ScopeId $ID -OptionId 3 -ErrorAction SilentlyContinue).Value
-        $Dns = (Get-DhcpServerv4OptionValue -ScopeId $ID -OptionId 6 -ErrorAction SilentlyContinue).Value
-        
-        Write-Host "Gateway:      $Gw"
-        Write-Host "DNS:          $Dns"
-
-        Write-Host ""
-        Write-Host "   --- Clientes DHCP Actuales ---" -ForegroundColor Cyan
-        $Concesiones = Get-DhcpServerv4Lease -ScopeId $ID -ErrorAction SilentlyContinue
-
-        if ($Concesiones) {
-            $Concesiones | Select-Object @{N='IP Cliente';E={$_.IPAddress}}, @{N='MAC';E={$_.ClientId}}, @{N='Hostname';E={$_.HostName}} | Format-Table -AutoSize
-        } else {
-            Write-Host "No hay clientes conectados."
-        }
-    } else {
-        log_warning "No hay ámbitos configurados. Ejecuta la opción 1 primero."
-    }
-    Pausa
-}
-
-while ($true) {
-    [Console]::Clear()
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "                SERVIDOR DHCP" -ForegroundColor Cyan
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "1) Configurar Servidor"
-    Write-Host "2) Monitorear Clientes"
-    Write-Host "3) Salir"
-    
-    $Seleccion = Read-Host "Seleccione una opción (1-3)"
-    
-    switch ($Seleccion) {
-        "1" { Configurar }
-        "2" { Monitorear }
-        "3" { log_info "Saliendo..."; exit }
-        default { log_error "Opción no válida."; Start-Sleep -Seconds 1 }
     }
 }

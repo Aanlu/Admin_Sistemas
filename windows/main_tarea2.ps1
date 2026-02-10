@@ -17,7 +17,7 @@ function Configurar {
     $PuertaEnlace = $null; $ServidorDNS = $null; $TiempoConcesion = $null
 
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "                 SERVIDOR DHCP " -ForegroundColor Cyan
+    Write-Host "                SERVIDOR DHCP " -ForegroundColor Cyan
     Write-Host "=================================================" -ForegroundColor Cyan
 
     $Interfaz = Get-InterfazInterna
@@ -45,15 +45,26 @@ function Configurar {
     } else {
         log_info "Modo Manual."
         $NombreAmbito = Read-Host "Nombre del Ámbito"
-        do { $IPInicio = Read-Host "IP Inicial" } until (Get-IPFormato $IPInicio)
-        do { $IPFin = Read-Host "IP Final" } until (Get-IPFormato $IPFin -and (Test-IPRango $IPInicio $IPFin))
-        $PuertaEnlace = Read-Host "Gateway"
-        $ServidorDNS = Read-Host "DNS"
+        
+        do { 
+            $IPInicio = Read-Host "IP Inicial" 
+            if (-not (Get-IPFormato $IPInicio)) { log_error "IP Inválida o Reservada." }
+        } until (Get-IPFormato $IPInicio)
+        
+        do { 
+            $IPFin = Read-Host "IP Final" 
+            $Valida = Get-IPFormato $IPFin
+            $Rango  = Test-IPRango $IPInicio $IPFin
+        } until ($Valida -and $Rango)
+        
+        do { $PuertaEnlace = Read-Host "Gateway" } until (Get-IPFormato $PuertaEnlace)
+        do { $ServidorDNS = Read-Host "DNS" } until (Get-IPFormato $ServidorDNS)
+
         $Segundos = Read-Host "Tiempo (segundos)"
+        if ($Segundos -notmatch "^\d+$") { $Segundos = 600 }
         $TiempoConcesion = New-TimeSpan -Seconds ([int]$Segundos)
     }
 
-    # Calculamos la ID nosotros para usarla DESPUÉS en las opciones
     $Octetos = $IPInicio.Split(".")
     $ScopeID = "$($Octetos[0]).$($Octetos[1]).$($Octetos[2]).0"
 
@@ -71,11 +82,8 @@ function Configurar {
             $ScopesViejos | Remove-DhcpServerv4Scope -Force
         }
 
-        # CORRECCIÓN AQUÍ: Quitamos "-ScopeId $ScopeID" porque tu versión de Windows no lo soporta.
-        # Windows calculará la ID automáticamente basándose en la IP de inicio y máscara.
         Add-DhcpServerv4Scope -Name $NombreAmbito -StartRange $IPInicio -EndRange $IPFin -SubnetMask 255.255.255.0 -State Active -LeaseDuration $TiempoConcesion
         
-        # Aquí sí usamos la $ScopeID que calculamos manual, porque Set-Option lo requiere
         Set-DhcpServerv4OptionValue -ScopeId $ScopeID -OptionId 3 -Value $PuertaEnlace
         
         try {
@@ -84,7 +92,7 @@ function Configurar {
             Set-DhcpServerv4OptionValue -ScopeId $ScopeID -OptionId 6 -Value $ServidorDNS -ErrorAction SilentlyContinue
         }
         
-        Restart-Service dhcpserver
+        Restart-Service dhcpserver -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
         log_ok "Servidor configurado correctamente."
 
     } catch {
@@ -94,52 +102,65 @@ function Configurar {
 }
 
 function Monitorear {
-    [Console]::Clear()
-    Write-Host "  --- Estado del Servidor ---" -ForegroundColor Cyan
-    
-    if ((Get-Service dhcpserver).Status -eq "Running") {
-        log_ok "Estado: Activo"
-    } else {
-        log_error "Estado: Inactivo"
-    }
-
-    $ScopeInfo = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Select-Object -First 1
-    
-    if ($ScopeInfo) {
-        # Obtenemos la ID real que Windows asignó
-        $ID = $ScopeInfo.ScopeId.IPAddressToString
-
-        Write-Host "    --- DETALLES DEL ÁMBITO ($ID) ---" -ForegroundColor Yellow
-        Write-Host "Nombre:       $($ScopeInfo.Name)"
-        Write-Host "Rango:        $($ScopeInfo.StartRange) - $($ScopeInfo.EndRange)"
-        Write-Host "Máscara:      $($ScopeInfo.SubnetMask)"
-        Write-Host "Lease Time:   $($ScopeInfo.LeaseDuration)"
-        
-        $Gw = (Get-DhcpServerv4OptionValue -ScopeId $ID -OptionId 3 -ErrorAction SilentlyContinue).Value
-        $Dns = (Get-DhcpServerv4OptionValue -ScopeId $ID -OptionId 6 -ErrorAction SilentlyContinue).Value
-        
-        Write-Host "Gateway:      $Gw"
-        Write-Host "DNS:          $Dns"
-
+    while ($true) {
+        [Console]::Clear()
+        Write-Host "   --- Estado del Servidor (Tiempo Real) ---" -ForegroundColor Cyan
+        Write-Host "       [Presione 'X' para Salir]" -ForegroundColor DarkGray
+        Write-Host "   -----------------------------------------" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "  --- Clientes DHCP Actuales ---" -ForegroundColor Cyan
-        $Concesiones = Get-DhcpServerv4Lease -ScopeId $ID -ErrorAction SilentlyContinue
 
-        if ($Concesiones) {
-            $Concesiones | Select-Object @{N='IP Cliente';E={$_.IPAddress}}, @{N='MAC';E={$_.ClientId}}, @{N='Hostname';E={$_.HostName}} | Format-Table -AutoSize
+        if ((Get-Service dhcpserver).Status -eq "Running") {
+            log_ok "Estado: Activo"
         } else {
-            Write-Host "No hay clientes conectados."
+            log_error "Estado: Inactivo"
         }
-    } else {
-        log_warning "No hay ámbitos configurados. Ejecuta la opción 1 primero."
+
+        $ScopeInfo = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Select-Object -First 1
+        
+        if ($ScopeInfo) {
+            $ID = $ScopeInfo.ScopeId.IPAddressToString
+
+            Write-Host "    --- DETALLES DEL ÁMBITO ($ID) ---" -ForegroundColor Yellow
+            Write-Host "Nombre:       $($ScopeInfo.Name)"
+            Write-Host "Rango:        $($ScopeInfo.StartRange) - $($ScopeInfo.EndRange)"
+            Write-Host "Máscara:      $($ScopeInfo.SubnetMask)"
+            Write-Host "Lease Time:   $($ScopeInfo.LeaseDuration)"
+            
+            $Gw = (Get-DhcpServerv4OptionValue -ScopeId $ID -OptionId 3 -ErrorAction SilentlyContinue).Value
+            $Dns = (Get-DhcpServerv4OptionValue -ScopeId $ID -OptionId 6 -ErrorAction SilentlyContinue).Value
+            
+            Write-Host "Gateway:      $Gw"
+            Write-Host "DNS:          $Dns"
+
+            Write-Host ""
+            Write-Host "   --- Clientes DHCP Actuales ---" -ForegroundColor Cyan
+            $Concesiones = Get-DhcpServerv4Lease -ScopeId $ID -ErrorAction SilentlyContinue
+
+            if ($Concesiones) {
+                $Concesiones | Select-Object @{N='IP Cliente';E={$_.IPAddress}}, @{N='MAC';E={$_.ClientId}}, @{N='Hostname';E={$_.HostName}} | Format-Table -AutoSize
+            } else {
+                Write-Host "No hay clientes conectados." -ForegroundColor DarkGray
+            }
+        } else {
+            log_warning "No hay ámbitos configurados. Ejecuta la opción 1 primero."
+        }
+        
+        for ($i = 0; $i -lt 20; $i++) {
+            if ([Console]::KeyAvailable) {
+                $Key = [Console]::ReadKey($true)
+                if ($Key.Key -eq "X") {
+                    return 
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        }
     }
-    Pausa
 }
 
 while ($true) {
     [Console]::Clear()
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "                 SERVIDOR DHCP" -ForegroundColor Cyan
+    Write-Host "                SERVIDOR DHCP" -ForegroundColor Cyan
     Write-Host "=================================================" -ForegroundColor Cyan
     Write-Host "1) Configurar Servidor"
     Write-Host "2) Monitorear Clientes"
