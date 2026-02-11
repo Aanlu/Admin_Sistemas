@@ -37,7 +37,7 @@ configurar(){
         return
     fi
 
-    INTERFACE=$(detectar_intefaz)
+    INTERFACE="enp0s8"
     [ -z "$INTERFACE" ] && { log_error "Sin interfaz de red detectada."; pausa; return; }
     
     echo -e "${AMARILLO}--- CONFIGURACIÓN DEL ÁMBITO DHCP ---${RESET}"
@@ -59,6 +59,9 @@ configurar(){
     SUBNET=$(obtener_id_red "$IP_INICIAL" "$MASCARA")
     
     preparar_servidor "$INTERFACE" "$IP_INICIAL" "$MASCARA"
+
+    IP_RANGO_INICIO=$(incrementar_ip "$IP_INICIAL")
+
 
     while true; do
         read -p "Gateway (Enter para omitir): " GW
@@ -89,7 +92,7 @@ max-lease-time $LEASE_TIME;
 authoritative;
 
 subnet $SUBNET netmask $MASCARA {
-    range $IP_INICIAL $IP_FINAL;
+    range $IP_RANGO_INICIO $IP_FINAL;
     $( [ ! -z "$GW" ] && echo "option routers $GW;" )
     $( [ ! -z "$DNS" ] && echo "option domain-name-servers $DNS;" )
     option domain-name "$SCOPE";
@@ -156,7 +159,7 @@ menu_principal() {
     while true; do
         clear
         echo "================================================="
-        echo "      GESTOR DHCP - FIM UAS"
+        echo "                  GESTOR DHCP "
         echo "================================================="
         
         for ((i=0; i<${#OPCIONES[@]}; i++)); do

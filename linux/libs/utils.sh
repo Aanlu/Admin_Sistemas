@@ -90,3 +90,24 @@ preparar_servidor(){
     ip addr add "$ip_asignada/$cidr" dev "$iface"
     sleep 1
 }
+
+incrementar_ip(){
+    local ip=$1
+    IFS= '.' read -r i1 i2 i3 i4 <<< "$ip"
+    d=$((d + 1))
+
+    if [ "$d" -gt 255 ]; then
+        d=0; c=$((c + 1))
+        if [ "$c" -gt 255 ]; then
+            c=0; b=$((b + 1))
+            if [ "$b" -gt 255 ]; then
+                b=0; a=$((a + 1))
+                if [ "$a" -gt 255 ]; then
+                    log_error "Rango de IP agotado."
+                    return 1
+                fi
+            fi
+        fi
+    fi
+
+}
