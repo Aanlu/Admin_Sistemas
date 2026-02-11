@@ -31,7 +31,8 @@ validar_formato_ip() {
         
         if [[ "$ip" == "0.0.0.0" ]]; then return 1; fi
         if [[ "$ip" == "255.255.255.255" ]]; then return 1; fi
-        if [[ "${octetos[0]}" -eq 127 ]]; then return 1; fi
+        if [[ "$ip" == "127.0.0.0" ]]; then return 1; fi
+        if [[ "$ip" == "127.0.0.1" ]]; then return 1; fi
         
         return 0
     else
@@ -40,13 +41,27 @@ validar_formato_ip() {
 }
 
 validar_rango(){
-    local ip1=$1; local ip2=$2
-    IFS=. read -r a b c d <<< "$ip1"
-    local val1=$((a * 256 ** 3 + b * 256 ** 2 + c * 256 + d))
-    IFS=. read -r a b c d <<< "$ip2"
-    local val2=$((a * 256 ** 3 + b * 256 ** 2 + c * 256 + d))
-    
-    if [ "$val2" -gt "$val1" ]; then return 0; else return 1; fi
+    local ip1=$1 
+    local ip2=$2 
+
+    local red1=$(echo "$ip1" | cut -d. -f1-3)
+    local red2=$(echo "$ip2" | cut -d. -f1-3)
+
+    if [ "$red1" != "$red2" ]; then
+        log_error "Las IPs deben estar estrictamente en el mismo segmento ($red1.x)."
+        log_error "Intentaste saltar de la red $red1 a la red $red2."
+        return 1 
+    fi
+
+    local host1=$(echo "$ip1" | cut -d. -f4)
+    local host2=$(echo "$ip2" | cut -d. -f4)
+
+    if [ "$host2" -le "$host1" ]; then
+        log_error "La IP final ($ip2) debe ser mayor que la inicial ($ip1)."
+        return 1
+    fi
+
+    return 0
 }
 
 obtener_mascara() {
