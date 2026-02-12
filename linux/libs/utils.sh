@@ -93,7 +93,7 @@ preparar_servidor(){
 
 incrementar_ip(){
     local ip=$1
-    IFS= '.' read -r i1 i2 i3 i4 <<< "$ip"
+    IFS='.' read -r a b c d <<< "$ip"
     d=$((d + 1))
 
     if [ "$d" -gt 255 ]; then
@@ -109,5 +109,6 @@ incrementar_ip(){
             fi
         fi
     fi
+    echo "$a.$b.$c.$d"
 
 }

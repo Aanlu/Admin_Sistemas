@@ -11,22 +11,43 @@ gestionar_instalacion() {
     if dpkg -s isc-dhcp-server >/dev/null 2>&1; then
         log_ok "El servicio DHCP ya se encuentra instalado."
         echo ""
-        read -p "¿Desea realizar una REINSTALACIÓN completa? (s/n): " RESP
         
-        if [[ "$RESP" == "s" || "$RESP" == "S" ]]; then
-            apt-get purge -y isc-dhcp-server >/dev/null
-            apt-get update -qq >/dev/null
-            apt-get install -y isc-dhcp-server >/dev/null
-            log_ok "Reinstalación finalizada."
-        else
-            return
-        fi
+        while true; do
+            read -p "¿Desea realizar una REINSTALACIÓN completa? (s/n): " RESP
+            case $RESP in
+                [sS]* ) 
+                    apt-get purge -y isc-dhcp-server >/dev/null
+                    apt-get update -qq >/dev/null
+                    apt-get install -y isc-dhcp-server >/dev/null
+                    log_ok "Reinstalación finalizada correctamente."
+                    pausa
+                    break
+                    ;;
+                [nN]* ) return ;;
+                * ) log_error "Por favor, responda s o n." ;;
+            esac
+        done
     else
-        apt-get update -qq >/dev/null
-        apt-get install -y isc-dhcp-server >/dev/null
-        log_ok "Instalación completada."
+        log_warning "Dependencias DHCP NO encontradas."
+        while true; do
+            read -p "¿Desea instalar el servicio DHCP ahora? (s/n): " RESP
+            case $RESP in
+                [sS]* )
+                    apt-get update -qq >/dev/null
+                    apt-get install -y isc-dhcp-server >/dev/null
+                    log_ok "Instalación completada correctamente."
+                    pausa
+                    break
+                    ;;
+                [nN]* ) 
+                    echo "Instalación cancelada."
+                    pausa
+                    return 
+                    ;;
+                * ) log_error "Por favor, responda s o n." ;;
+            esac
+        done
     fi
-    pausa
 }
 
 configurar(){
@@ -102,6 +123,7 @@ EOL
     systemctl restart isc-dhcp-server
     if systemctl is-active --quiet isc-dhcp-server; then
         log_ok "Servicio Configurado y ACTIVO."
+        log_info "Ámbito: $SCOPE | Rango: $IP_RANGO_INICIO - $IP_FINAL | Gateway: ${GW:-N/A} | DNS: ${DNS:-N/A} | Lease Time: $LEASE_TIME segs"
     else
         log_error "Fallo al iniciar el servicio."
         journalctl -u isc-dhcp-server | tail -n 5
@@ -109,11 +131,58 @@ EOL
     pausa
 }
 
+alternar_servicio() {
+    clear
+    echo -e "${AMARILLO}--- CONTROL DE SERVICIO DHCP ---${RESET}"
+
+    if ! dpkg -s isc-dhcp-server >/dev/null 2>&1; then
+        log_error "El servicio no está instalado."
+        pausa
+        return
+    fi
+
+    if systemctl is-active --quiet isc-dhcp-server; then
+        echo -e "El servicio está actualmente: ${VERDE}ACTIVO${RESET}"
+        while true; do
+            read -p "¿Desea DESACTIVAR el servicio? (s/n): " RESP
+            case $RESP in
+                [sS]* )
+                    systemctl stop isc-dhcp-server
+                    log_warning "Servicio detenido."
+                    pausa
+                    break
+                    ;;
+                [nN]* ) break ;;
+            esac
+        done
+    else
+        echo -e "El servicio está actualmente: ${ROJO}INACTIVO${RESET}"
+        while true; do
+            read -p "¿Desea ACTIVAR el servicio? (s/n): " RESP
+            case $RESP in
+                [sS]* )
+                    systemctl start isc-dhcp-server
+                    log_ok "Servicio iniciado."
+                    pausa
+                    break
+                    ;;
+                [nN]* ) break ;;
+            esac
+        done
+    fi
+}
+
 monitorear(){
     while true; do
         clear
         echo -e "${AMARILLO}=== MONITOR EN TIEMPO REAL (Presione 'x' para salir) ===${RESET}"
         
+        if ! dpkg -s isc-dhcp-server >/dev/null 2>&1; then
+            log_error "El servicio DHCP no está instalado."
+            pausa
+            break
+        fi
+
         echo -e "\n[ CONFIGURACIÓN ACTIVA ]"
         if [ -f /etc/dhcp/dhcpd.conf ]; then
             grep -E "subnet|netmask|range|routers" /etc/dhcp/dhcpd.conf | sed 's/{//g;s/;//g'
@@ -124,27 +193,28 @@ monitorear(){
         echo -e "\n[ ESTADO DEL SERVICIO ]"
         if systemctl is-active --quiet isc-dhcp-server; then
              echo -e "Estado: ${VERDE}ACTIVO${RESET}"
+             
+             echo -e "\n[ CLIENTES ]"
+             printf "%-18s %-20s %-20s\n" "IP Address" "MAC Address" "Hostname"
+             echo "------------------------------------------------------------"
+             
+             LEASE_FILE="/var/lib/dhcp/dhcpd.leases"
+             if [ -f "$LEASE_FILE" ]; then
+                  grep -E "lease |hardware ethernet|client-hostname" "$LEASE_FILE" | awk '
+                     BEGIN { RS="}" } 
+                     {
+                         ip=""; mac=""; name="Unknown";
+                         for(i=1;i<=NF;i++) {
+                             if($i == "lease") ip=$(i+1);
+                             if($i == "hardware") mac=$(i+2);
+                             if($i == "client-hostname") { name=$(i+1); gsub(/[";]/, "", name); }
+                         }
+                         if(ip != "") printf "%-18s %-20s %-20s\n", ip, mac, name;
+                     }' | sort -u
+             fi
         else
              echo -e "Estado: ${ROJO}INACTIVO${RESET}"
-        fi
-
-        echo -e "\n[ CLIENTES ]"
-        printf "%-18s %-20s %-20s\n" "IP Address" "MAC Address" "Hostname"
-        echo "------------------------------------------------------------"
-        
-        LEASE_FILE="/var/lib/dhcp/dhcpd.leases"
-        if [ -f "$LEASE_FILE" ]; then
-             grep -E "lease |hardware ethernet|client-hostname" "$LEASE_FILE" | awk '
-                BEGIN { RS="}" } 
-                {
-                    ip=""; mac=""; name="Unknown";
-                    for(i=1;i<=NF;i++) {
-                        if($i == "lease") ip=$(i+1);
-                        if($i == "hardware") mac=$(i+2);
-                        if($i == "client-hostname") { name=$(i+1); gsub(/[";]/, "", name); }
-                    }
-                    if(ip != "") printf "%-18s %-20s %-20s\n", ip, mac, name;
-                }' | sort -u
+             log_warning "El servicio está detenido. No se muestran clientes."
         fi
 
         read -t 2 -n 1 key
@@ -153,7 +223,7 @@ monitorear(){
 }
 
 menu_principal() {
-    OPCIONES=("Instalar / Reinstalar Servicio" "Configurar DHCP" "Monitorear Clientes" "Salir")
+    OPCIONES=("Instalar / Reinstalar Servicio" "Configurar DHCP" "Activar/Desactivar Servicio" "Monitorear Clientes" "Salir")
     SELECCION=0
 
     while true; do
@@ -184,8 +254,9 @@ menu_principal() {
             case $SELECCION in
                 0) gestionar_instalacion ;;
                 1) configurar ;;
-                2) monitorear ;;
-                3) exit 0 ;;
+                2) alternar_servicio ;;
+                3) monitorear ;;
+                4) exit 0 ;;
             esac
         fi
     done
