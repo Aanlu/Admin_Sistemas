@@ -1,5 +1,2 @@
-﻿# Ignorar binarios
-*.iso
-*.exe
-*.zip
-*.vdi
+﻿logs/*.log
+.DS_Store.tmp
