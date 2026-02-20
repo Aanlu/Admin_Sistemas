@@ -1,4 +1,4 @@
-. .\libs\utils.ps1
+﻿. .\libs\utils.ps1
 
 Clear-Host
 Write-Output "Nombre del equipo:"

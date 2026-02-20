@@ -9,3 +9,4 @@ $TTL    86400
 @       IN      NS      ns1.@@DOMINIO@@.
 ns1     IN      A       @@IP_SERVIDOR@@
 @       IN      A       @@IP_SERVIDOR@@
+www     IN      A       @@IP_SERVIDOR@@

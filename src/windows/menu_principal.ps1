@@ -1,4 +1,4 @@
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+﻿if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Write-Host "[ERROR] Este script debe ser ejecutado como Administrador." -ForegroundColor Red
     exit
 }
@@ -11,19 +11,16 @@ Set-Location -Path $ScriptDir
 $OpcionesPrincipales = @(
     "Diagnóstico de Red",
     "Configuración Servidor DHCP",
-    "Configuración Servidor DNS (CRUD)"
+    "Configuración Servidor DNS"
 )
 
 while ($true) {
-    $Eleccion = Generar-Menu "MENÚ PRINCIPAL - ADMIN SISTEMAS" $OpcionesPrincipales "Salir del Sistema"
+    $Eleccion = Generar-Menu "      MENÚ PRINCIPAL" $OpcionesPrincipales "Salir del Sistema"
 
     switch ($Eleccion) {
         0 { . .\modulos\01_diagnostico.ps1 }
         1 { . .\modulos\02_dhcp.ps1 }
-        2 { 
-            Log-Warning "Módulo DNS se implementará en la siguiente fase."
-            Pausa 
-        }
+        2 { . .\modulos\03_dns.ps1 }
         3 { 
             Clear-Host
             Write-Host "Cerrando sistema..." -ForegroundColor Green

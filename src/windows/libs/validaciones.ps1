@@ -1,12 +1,21 @@
-function Validar-Formato-IP {
-    param($ip)
+﻿function Validar-Formato-IP {
+    param([string]$ip)
+    
+    if ($ip -notmatch "^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$") { 
+        return $false 
+    }
+    $octetos = $ip.Split('.')
+    foreach ($oct in $octetos) {
+        if ([int]$oct -lt 0 -or [int]$oct -gt 255) { return $false }
+    }
+
     $ipsProhibidas = @("0.0.0.0", "255.255.255.255", "127.0.0.0", "127.0.0.1")
     
-    if ([System.Net.IPAddress]::TryParse($ip, [ref]$null)) {
-        if ($ipsProhibidas -contains $ip) { return $false }
-        return $true
-    }
-    return $false
+    $ip_limpia = "{0}.{1}.{2}.{3}" -f [int]$octetos[0], [int]$octetos[1], [int]$octetos[2], [int]$octetos[3]
+
+    if ($ipsProhibidas -contains $ip_limpia) { return $false }
+    
+    return $true
 }
 
 function Validar-Rango {
