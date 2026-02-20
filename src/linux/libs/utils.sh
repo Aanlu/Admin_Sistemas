@@ -7,13 +7,17 @@ AZUL='\033[0;34m'
 RESET='\033[0m'
 
 LOG_FILE="../../logs/linux_services.log"
+mkdir -p "$(dirname "$LOG_FILE")"
 
 log_info() { echo -e "${AZUL}[INFO]${RESET} $1"; }
 log_ok() { echo -e "${VERDE}[OK]${RESET} $1"; }
 log_error() { echo -e "${ROJO}[ERROR]${RESET} $1"; }
 log_warning() { echo -e "${AMARILLO}[AVISO]${RESET} $1"; }
 
-pausa() { read -rsp "Presione [Enter] para continuar..." -n1; echo ""; }
+pausa() {
+    echo -e "\n${AZUL}Presione [Enter] para continuar...${RESET}"
+    read -r < /dev/tty
+}
 
 instalar_dependencia_silenciosa() {
     local paquete=$1
@@ -93,4 +97,38 @@ capturar_ip() {
             log_error "IP inválida o prohibida. Intente de nuevo." >&2
         fi
     done
+}
+
+capturar_ip_opcional() {
+    local mensaje=$1
+    local input_ip
+
+    while true; do
+        read -p "$mensaje [Enter para omitir]: " input_ip
+        
+        if [ -z "$input_ip" ]; then
+            echo ""
+            return 0
+        fi
+        
+        if validar_formato_ip "$input_ip"; then
+            echo "$input_ip"
+            return 0
+        else
+            log_error "IP inválida o prohibida. Intente de nuevo o presione Enter para omitir." >&2
+        fi
+    done
+}
+
+confirmar_accion() {
+    local mensaje=$1
+    local opciones_binarias=("Sí, proceder con la acción")
+    
+    generar_menu "CONFIRMACIÓN: $mensaje" opciones_binarias "No, cancelar y volver"
+    
+    if [ $? -eq 0 ]; then
+        return 0
+    else
+        return 1
+    fi
 }

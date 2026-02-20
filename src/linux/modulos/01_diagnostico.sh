@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ../libs/utils.sh
+source libs/utils.sh
 
 clear
 echo -e "El nombre del equipo es: \c"
