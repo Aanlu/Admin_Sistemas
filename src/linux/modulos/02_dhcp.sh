@@ -66,10 +66,29 @@ configurar_dhcp() {
     [ "$mascara" == "255.0.0.0" ] && cidr=8
     [ "$mascara" == "255.255.0.0" ] && cidr=16
 
-    ip link set dev "$interface" up
-    ip addr flush dev "$interface"
-    ip addr add "$ip_inicial/$cidr" dev "$interface"
-    sleep 1
+    local ip_actual=$(ip -4 addr show "$interface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
+    if [ "$ip_inicial" != "$ip_actual" ]; then
+        if systemctl is-active --quiet ssh; then
+            echo -e "\n${ROJO}==========================================================${RESET}"
+            echo -e "\e[41m\e[97m [!] ALERTA DE DESCONEXIÓN INMINENTE [!] \e[0m"
+            echo -e "${ROJO}==========================================================${RESET}"
+            echo -e "${AMARILLO}Se cambiará la IP principal del servidor. Su sesión remota se cortará.${RESET}"
+            echo -e "La nueva IP será: ${VERDE}$ip_inicial${RESET}"
+            echo -e "\nPara reconectarse, copie y ejecute:"
+            echo -e "----------------------------------------------------------"
+            echo -e "${VERDE}ssh $USER@$ip_inicial${RESET}"
+            echo -e "----------------------------------------------------------"
+            echo -e "${CIAN}Aplicando cambios en 5 segundos...${RESET}"
+            sleep 5
+        fi
+        ip link set dev "$interface" up
+        ip addr flush dev "$interface"
+        ip addr add "$ip_inicial/$cidr" dev "$interface"
+        sleep 2
+    else
+        echo -e "\n${VERDE}[OK] La interfaz ya posee la IP $ip_inicial. Omitiendo reinicio para proteger sesión SSH.${RESET}"
+    fi
 
     local ip_rango_inicio=$(incrementar_ip "$ip_inicial")
     

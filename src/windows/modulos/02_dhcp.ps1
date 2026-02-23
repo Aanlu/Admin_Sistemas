@@ -89,28 +89,49 @@ function Configurar-DHCP {
         Log-Error "Debe ser un número entero positivo."
     }
 
-   try {
-        Set-NetIPInterface -InterfaceAlias $ALIAS -Dhcp Disabled -AddressFamily IPv4 -ErrorAction SilentlyContinue
-        Remove-NetIPAddress -InterfaceAlias $ALIAS -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
-        Remove-NetRoute -InterfaceAlias $ALIAS -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
-        
-        if ([string]::IsNullOrWhiteSpace($GW)) {
-            New-NetIPAddress -InterfaceAlias $ALIAS -IPAddress $IP_INICIAL -PrefixLength $CIDR -ErrorAction Stop | Out-Null
-        } else {
-            New-NetIPAddress -InterfaceAlias $ALIAS -IPAddress $IP_INICIAL -PrefixLength $CIDR -DefaultGateway $GW -ErrorAction Stop | Out-Null
-        }
-        
+    $ipActualObj = Get-NetIPAddress -InterfaceAlias $ALIAS -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
+    $IP_ACTUAL = if ($ipActualObj) { $ipActualObj.IPAddress } else { "" }
 
-        Write-Host "`n[AVISO] Reiniciando interfaz y estabilizando enlace. Por favor espere..." -ForegroundColor Yellow
-        Write-Host "`n[AVISO] Reiniciando interfaz y estabilizando enlace. Por favor espere..." -ForegroundColor Yellow
-        Restart-NetAdapter -Name $ALIAS -ErrorAction SilentlyContinue
-        
-        $intentos = 0
-        while ((Get-NetAdapter -Name $ALIAS).Status -ne "Up" -and $intentos -lt 10) {
-            Start-Sleep -Seconds 1
-            $intentos++
+    try {
+        if ($IP_INICIAL -ne $IP_ACTUAL) {
+            $svcSSH = Get-Service -Name sshd -ErrorAction SilentlyContinue
+            if ($svcSSH -and $svcSSH.Status -eq "Running") {
+                Write-Host "`n==========================================================" -ForegroundColor Red
+                Write-Host " [!] ALERTA DE DESCONEXIÓN INMINENTE [!] " -BackgroundColor Red -ForegroundColor White
+                Write-Host "==========================================================" -ForegroundColor Red
+                Write-Host "Se cambiará la IP principal del servidor. Su sesión remota se cortará."
+                Write-Host "La nueva IP será: $IP_INICIAL" -ForegroundColor Yellow
+                Write-Host "`nPara reconectarse, copie y ejecute:"
+                Write-Host "----------------------------------------------------------"
+                Write-Host "ssh $env:USERNAME@$IP_INICIAL" -ForegroundColor Green
+                Write-Host "----------------------------------------------------------"
+                Write-Host "`nAplicando cambios en 5 segundos..." -ForegroundColor Cyan
+                Start-Sleep -Seconds 5
+            }
+
+            Set-NetIPInterface -InterfaceAlias $ALIAS -Dhcp Disabled -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            Remove-NetIPAddress -InterfaceAlias $ALIAS -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
+            Remove-NetRoute -InterfaceAlias $ALIAS -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
+            
+            if ([string]::IsNullOrWhiteSpace($GW)) {
+                New-NetIPAddress -InterfaceAlias $ALIAS -IPAddress $IP_INICIAL -PrefixLength $CIDR -ErrorAction Stop | Out-Null
+            } else {
+                New-NetIPAddress -InterfaceAlias $ALIAS -IPAddress $IP_INICIAL -PrefixLength $CIDR -DefaultGateway $GW -ErrorAction Stop | Out-Null
+            }
+
+            Write-Host "`n[AVISO] Reiniciando interfaz y estabilizando enlace. Por favor espere..." -ForegroundColor Yellow
+            Restart-NetAdapter -Name $ALIAS -ErrorAction SilentlyContinue
+            
+            $intentos = 0
+            while ((Get-NetAdapter -Name $ALIAS).Status -ne "Up" -and $intentos -lt 10) {
+                Start-Sleep -Seconds 1
+                $intentos++
+            }
+            Start-Sleep -Seconds 4
+        } else {
+            Write-Host "`n[OK] La interfaz ya posee la IP $IP_INICIAL. Omitiendo reinicio para proteger sesión SSH." -ForegroundColor Green
         }
-        Start-Sleep -Seconds 4 
+
         $scopeCheck = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue
         if ($scopeCheck) { 
             $scopeCheck | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue 
@@ -122,6 +143,7 @@ function Configurar-DHCP {
         if ($GW) { Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 3 -Value @($GW) -Force -ErrorAction Stop }
         Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 6 -Value @($DNS) -Force -ErrorAction Stop
         Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 15 -Value $SCOPE_NAME -Force -ErrorAction Stop
+        
         Abrir-Puertos-Servicio -NombreServicio "DHCP" -Puertos 67,68 -Protocolo UDP
         Permitir-Ping-Global
         Restart-Service DHCPServer -Force
