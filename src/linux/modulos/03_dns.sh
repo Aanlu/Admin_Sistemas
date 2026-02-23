@@ -22,6 +22,20 @@ verificar_ip_fija() {
         [ "$mascara" == "255.0.0.0" ] && cidr=8
         [ "$mascara" == "255.255.0.0" ] && cidr=16
         
+        if systemctl is-active --quiet ssh; then
+            local usuario_actual=$USER
+            echo -e "\n${ROJO}==========================================================${RESET}"
+            echo -e "\e[41m\e[97m [!] ALERTA DE DESCONEXIÓN INMINENTE [!] \e[0m"
+            echo -e "${ROJO}==========================================================${RESET}"
+            echo -e "${AMARILLO}Se cambiará la IP principal. Su sesión remota se cortará.${RESET}"
+            echo -e "Para reconectarse, copie y ejecute:"
+            echo -e "----------------------------------------------------------"
+            echo -e "${VERDE}ssh $usuario_actual@$nueva_ip${RESET}"
+            echo -e "----------------------------------------------------------"
+            echo -e "${CIAN}Aplicando cambios en 5 segundos...${RESET}"
+            sleep 5
+        fi
+
         ip addr flush dev "$iface"
         ip addr add "$nueva_ip/$cidr" dev "$iface"
         ip link set dev "$iface" up

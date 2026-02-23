@@ -1,4 +1,4 @@
-. .\libs\utils.ps1
+﻿. .\libs\utils.ps1
 . .\libs\validaciones.ps1
 
 function Inyectar-IP-Inicial {
