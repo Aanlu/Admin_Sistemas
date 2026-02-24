@@ -7,8 +7,8 @@ configurar_interfaz_ssh() {
     echo -e "${AMARILLO}--- DESPLIEGUE DE RED DE ADMINISTRACIÓN ---${RESET}"
     
     local interface="enp0s9"
-    local ip_server="1.1.1.1"
-    local ip_client="1.1.1.1"
+    local ip_server="100.0.0.10"
+    local ip_client="100.0.0.11"
     local cidr="24"
     
     echo -e "${CIAN}[1/3] Verificando y levantando la interfaz $interface...${RESET}"
