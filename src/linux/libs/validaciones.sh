@@ -5,7 +5,8 @@ validar_formato_ip() {
     if [[ $ip =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
         IFS='.' read -r -a octetos <<< "$ip"
         for oct in "${octetos[@]}"; do
-            if [[ "$oct" -lt 0 || "$oct" -gt 255 ]]; then return 1; fi
+            local num=$((10#$oct))
+            if [[ "$num" -lt 0 || "$num" -gt 255 ]]; then return 1; fi
         done
         if [[ "$ip" == "0.0.0.0" || "$ip" == "255.255.255.255" || "$ip" == "127.0.0.1" ]]; then return 1; fi
         return 0
@@ -14,36 +15,51 @@ validar_formato_ip() {
     fi
 }
 
-validar_rango(){
+validar_rango() {
     local ip1=$1 
     local ip2=$2 
-    local red1=$(echo "$ip1" | cut -d. -f1-3)
-    local red2=$(echo "$ip2" | cut -d. -f1-3)
-    if [ "$red1" != "$red2" ]; then return 1; fi
-    local host1=$(echo "$ip1" | cut -d. -f4)
-    local host2=$(echo "$ip2" | cut -d. -f4)
-    if [ "$host2" -le "$host1" ]; then return 1; fi
+    local int_ip1=0
+    local int_ip2=0
+    
+    IFS=. read -r i1 i2 i3 i4 <<< "$ip1"
+    int_ip1=$(( (10#$i1 << 24) + (10#$i2 << 16) + (10#$i3 << 8) + 10#$i4 ))
+    
+    IFS=. read -r i1 i2 i3 i4 <<< "$ip2"
+    int_ip2=$(( (10#$i1 << 24) + (10#$i2 << 16) + (10#$i3 << 8) + 10#$i4 ))
+    
+    if [ "$int_ip2" -le "$int_ip1" ]; then return 1; fi
     return 0
 }
 
 obtener_mascara() {
     local ip=$1
     local pri_oct=$(echo "$ip" | cut -d. -f1)
-    if [ "$pri_oct" -ge 1 ] && [ "$pri_oct" -le 126 ]; then echo "255.0.0.0";
-    elif [ "$pri_oct" -ge 128 ] && [ "$pri_oct" -le 191 ]; then echo "255.255.0.0";
+    local num=$((10#$pri_oct))
+    
+    if [ "$num" -ge 1 ] && [ "$num" -le 126 ]; then echo "255.0.0.0";
+    elif [ "$num" -ge 128 ] && [ "$num" -le 191 ]; then echo "255.255.0.0";
     else echo "255.255.255.0"; fi
 }
 
 obtener_id_red() {
-    local ip=$1; local mask=$2
+    local ip=$1
+    local mask=$2
+    
     IFS=. read -r i1 i2 i3 i4 <<< "$ip"
     IFS=. read -r m1 m2 m3 m4 <<< "$mask"
-    echo "$((i1 & m1)).$((i2 & m2)).$((i3 & m3)).$((i4 & m4))"
+    
+    echo "$((10#$i1 & 10#$m1)).$((10#$i2 & 10#$m2)).$((10#$i3 & 10#$m3)).$((10#$i4 & 10#$m4))"
 }
 
-incrementar_ip(){
+incrementar_ip() {
     local ip=$1
     IFS='.' read -r a b c d <<< "$ip"
+    
+    a=$((10#$a))
+    b=$((10#$b))
+    c=$((10#$c))
+    d=$((10#$d))
+    
     d=$((d + 1))
     if [ "$d" -gt 255 ]; then
         d=0; c=$((c + 1))

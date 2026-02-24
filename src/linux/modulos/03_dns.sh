@@ -53,7 +53,7 @@ instalar_dependencia_silenciosa "bind9utils" || { log_error "Fallo al instalar b
 instalar_dependencia_silenciosa "bind9-doc" || { log_error "Fallo al instalar bind9-doc."; pausa; exit 1; }
 instalar_dependencia_silenciosa "dnsutils" || { log_error "Fallo al instalar dnsutils."; pausa; exit 1; }
 
-TEMPLATE_ZONA="../../templates/linux/db.zona.template"
+TEMPLATE_ZONA="../../templates/linux/db.zona.templates"
 CONF_LOCAL="/etc/bind/named.conf.local"
 DIR_ZONAS="/var/cache/bind"
 
@@ -95,10 +95,7 @@ crear_zona() {
         log_info "Servicio BIND9 detectado y operando en segundo plano."
     fi
 
-    if [ ! -f "$TEMPLATE_ZONA" ]; then
-        log_error "Falta el archivo de plantilla base en la ruta de templates."
-        pausa; return
-    fi
+   
 
     local dominio
     while true; do

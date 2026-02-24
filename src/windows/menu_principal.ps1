@@ -21,7 +21,8 @@ while ($true) {
         0 { . .\modulos\01_diagnostico.ps1 }
         1 { . .\modulos\02_dhcp.ps1 }
         2 { . .\modulos\03_dns.ps1 }
-        3 { 
+        3 { . .\modulos\04_ssh.ps1 }
+        4 { 
             Clear-Host
             Write-Host "Cerrando sistema..." -ForegroundColor Green
             exit 

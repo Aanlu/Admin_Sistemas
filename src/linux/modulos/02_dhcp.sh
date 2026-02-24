@@ -1,5 +1,4 @@
 #!/bin/bash
-
 source libs/utils.sh
 source libs/validaciones.sh
 
@@ -45,14 +44,30 @@ configurar_dhcp() {
 
     local interface="enp0s8"
     
-    echo -e "${AMARILLO}--- CONFIGURACIÓN DEL ÁMBITO DHCP ---${RESET}"
+    ip link set dev "$interface" up
+    
+    echo -e "${AMARILLO}--- CONFIGURACIÓN DEL ÁMBITO DHCP EN $interface ---${RESET}"
     read -p "Nombre del Ámbito (Scope): " scope
     
-    local ip_inicial=$(capturar_ip "IP Inicial (Se asignará al Servidor)")
+    local ip_inicial
+    local red_dhcp
+    
+    while true; do
+        ip_inicial=$(capturar_ip "IP Estática del Servidor (Se asignará a $interface)")
+        red_dhcp=$(echo "$ip_inicial" | cut -d. -f1-3)
+        
+        if [ "$red_dhcp" == "172.16.99" ]; then
+            log_error "CONFLICTO DETECTADO: No puedes usar la red 172.16.99.x. Está reservada para SSH en enp0s9."
+        elif [ "$red_dhcp" == "10.0.2" ]; then
+            log_error "CONFLICTO DETECTADO: No puedes usar la red 10.0.2.x. Pertenece al NAT de VirtualBox (enp0s3)."
+        else
+            break
+        fi
+    done
     
     local ip_final
     while true; do
-        read -p "IP Final del rango: " ip_final
+        read -p "IP Final del rango DHCP: " ip_final
         if validar_formato_ip "$ip_final" && validar_rango "$ip_inicial" "$ip_final"; then
             break
         else
@@ -60,39 +75,8 @@ configurar_dhcp() {
         fi
     done
 
-    local mascara=$(obtener_mascara "$ip_inicial")
-    local subnet=$(obtener_id_red "$ip_inicial" "$mascara")
-    local cidr=24
-    [ "$mascara" == "255.0.0.0" ] && cidr=8
-    [ "$mascara" == "255.255.0.0" ] && cidr=16
-
-    local ip_actual=$(ip -4 addr show "$interface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-
-    if [ "$ip_inicial" != "$ip_actual" ]; then
-        if systemctl is-active --quiet ssh; then
-            echo -e "\n${ROJO}==========================================================${RESET}"
-            echo -e "\e[41m\e[97m [!] ALERTA DE DESCONEXIÓN INMINENTE [!] \e[0m"
-            echo -e "${ROJO}==========================================================${RESET}"
-            echo -e "${AMARILLO}Se cambiará la IP principal del servidor. Su sesión remota se cortará.${RESET}"
-            echo -e "La nueva IP será: ${VERDE}$ip_inicial${RESET}"
-            echo -e "\nPara reconectarse, copie y ejecute:"
-            echo -e "----------------------------------------------------------"
-            echo -e "${VERDE}ssh $USER@$ip_inicial${RESET}"
-            echo -e "----------------------------------------------------------"
-            echo -e "${CIAN}Aplicando cambios en 5 segundos...${RESET}"
-            sleep 5
-        fi
-        ip link set dev "$interface" up
-        ip addr flush dev "$interface"
-        ip addr add "$ip_inicial/$cidr" dev "$interface"
-        sleep 2
-    else
-        echo -e "\n${VERDE}[OK] La interfaz ya posee la IP $ip_inicial. Omitiendo reinicio para proteger sesión SSH.${RESET}"
-    fi
-
     local ip_rango_inicio=$(incrementar_ip "$ip_inicial")
-    
-    local gw=$(capturar_ip_opcional "Gateway")
+    local gw=$(capturar_ip_opcional "Gateway (Dejar en blanco si es red interna aislada)")
     local dns=$(capturar_ip "Servidor DNS principal")
     
     local lease_time
@@ -101,6 +85,12 @@ configurar_dhcp() {
         if [[ "$lease_time" =~ ^[0-9]+$ ]] && [ "$lease_time" -gt 0 ]; then break; fi
         log_error "Debe ser un número entero positivo."
     done
+
+    local mascara=$(obtener_mascara "$ip_inicial")
+    local subnet=$(obtener_id_red "$ip_inicial" "$mascara")
+    local cidr=24
+    [ "$mascara" == "255.0.0.0" ] && cidr=8
+    [ "$mascara" == "255.255.0.0" ] && cidr=16
 
     sed -i "s/INTERFACESv4=.*/INTERFACESv4=\"$interface\"/g" /etc/default/isc-dhcp-server
 
@@ -117,11 +107,18 @@ subnet $subnet netmask $mascara {
 }
 EOL
 
+    echo -e "${CIAN}Limpiando IPs anteriores y asignando $ip_inicial a $interface...${RESET}"
+    ip addr flush dev "$interface"
+    ip addr add "$ip_inicial/$cidr" dev "$interface"
+
+    echo -e "${CIAN}Reiniciando isc-dhcp-server...${RESET}"
     systemctl restart isc-dhcp-server
+    
     if systemctl is-active --quiet isc-dhcp-server; then
-        log_ok "Servicio Configurado y ACTIVO."
+        log_ok "Servicio Configurado y ACTIVO en $interface."
+        echo -e "${VERDE}La red DHCP es independiente y tu sesión SSH en enp0s9 está protegida.${RESET}"
     else
-        log_error "Fallo al iniciar el servicio. Revise $LOG_FILE"
+        log_error "Fallo al iniciar el servicio DHCP. Revise los logs del sistema."
     fi
     pausa
 }
@@ -175,29 +172,29 @@ monitorear_clientes(){
 
         echo -e "\n${AZUL}[ ESTADO DEL SERVICIO ]${RESET}"
         if systemctl is-active --quiet isc-dhcp-server; then
-             echo -e "Estado: ${VERDE}ACTIVO${RESET}"
-             
-             echo -e "\n${AMARILLO}[ CLIENTES CONECTADOS ]${RESET}"
-             printf "%-18s %-20s %-20s\n" "IP Address" "MAC Address" "Hostname"
-             echo "------------------------------------------------------------"
-             
-             local lease_file="/var/lib/dhcp/dhcpd.leases"
-             if [ -f "$lease_file" ]; then
-                  grep -E "lease |hardware ethernet|client-hostname" "$lease_file" | awk '
-                  BEGIN { RS="}" } 
-                  {
-                      ip=""; mac=""; name="Unknown";
-                      for(i=1;i<=NF;i++) {
-                          if($i == "lease") ip=$(i+1);
-                          if($i == "hardware") mac=$(i+2);
-                          if($i == "client-hostname") { name=$(i+1); gsub(/[";]/, "", name); }
-                      }
-                      if(ip != "") printf "%-18s %-20s %-20s\n", ip, mac, name;
-                  }' | sort -u
-             fi
+            echo -e "Estado: ${VERDE}ACTIVO${RESET}"
+            
+            echo -e "\n${AMARILLO}[ CLIENTES CONECTADOS ]${RESET}"
+            printf "%-18s %-20s %-20s\n" "IP Address" "MAC Address" "Hostname"
+            echo "------------------------------------------------------------"
+            
+            local lease_file="/var/lib/dhcp/dhcpd.leases"
+            if [ -f "$lease_file" ]; then
+                grep -E "lease |hardware ethernet|client-hostname" "$lease_file" | awk '
+                BEGIN { RS="}" } 
+                {
+                    ip=""; mac=""; name="Unknown";
+                    for(i=1;i<=NF;i++) {
+                        if($i == "lease") ip=$(i+1);
+                        if($i == "hardware") mac=$(i+2);
+                        if($i == "client-hostname") { name=$(i+1); gsub(/[";]/, "", name); }
+                    }
+                    if(ip != "") printf "%-18s %-20s %-20s\n", ip, mac, name;
+                }' | sort -u
+            fi
         else
-             echo -e "Estado: ${ROJO}INACTIVO${RESET}"
-             log_warning "El servicio está detenido. No se muestran clientes."
+            echo -e "Estado: ${ROJO}INACTIVO${RESET}"
+            log_warning "El servicio está detenido. No se muestran clientes."
         fi
 
         read -t 2 -n 1 key
