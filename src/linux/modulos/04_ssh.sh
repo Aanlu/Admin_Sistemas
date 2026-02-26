@@ -3,17 +3,24 @@ source libs/utils.sh
 source libs/validaciones.sh
 
 configurar_interfaz_ssh() {
-    clear
-    echo -e "${AMARILLO}--- DESPLIEGUE DE RED DE ADMINISTRACIÓN ---${RESET}"
     
-    local interface="enp0s9"
-    local ip_server="100.0.0.10"
-    local ip_client="100.0.0.11"
+    # 1. Menú Dinámico: Dejamos que el sistema dicte qué interfaces existen
+    seleccionar_interfaz_dinamica
+    if [ $? -ne 0 ]; then
+        log_warning "Configuración SSH cancelada."
+        pausa; return
+    fi
+    
+    local interface="$INTERFAZ_SELECCIONADA"
+
+    # El resto de tu código a partir de aquí se mantiene exactamente igual...
+    local ip_server=$(capturar_ip "IP del Servidor SSH" "100.0.0.10")
+    # ...
+    local ip_client=$(capturar_ip "IP sugerida para el Cliente" "100.0.0.11")
     local cidr="24"
     
-    echo -e "${CIAN}[1/3] Verificando y levantando la interfaz $interface...${RESET}"
+    echo -e "${CIAN}[1/3] Levantando administrativamente $interface...${RESET}"
     ip link set dev "$interface" up
-    sleep 1
     
     if ! dpkg -s openssh-server >/dev/null 2>&1; then
         echo -e "${CIAN}[2/3] Instalando servidor SSH silenciosamente...${RESET}"
@@ -25,30 +32,40 @@ configurar_interfaz_ssh() {
     fi
 
     echo -e "${CIAN}[3/3] Aplicando topología de red...${RESET}"
-    if ip addr show "$interface" | grep -q "$ip_server"; then
-        echo -e "${VERDE}[OK] La IP $ip_server ya está asignada a $interface.${RESET}"
-    else
-        ip addr add "$ip_server/$cidr" dev "$interface" 2>/dev/null
-        systemctl restart ssh
-        echo -e "${VERDE}[OK] IP $ip_server asignada correctamente.${RESET}"
-    fi
+    ip addr flush dev "$interface" 2>/dev/null
+    ip addr add "$ip_server/$cidr" dev "$interface" 2>/dev/null
+    systemctl restart ssh
 
-    echo -e "\n${VERDE}========================================================================${RESET}"
-    echo -e "${AMARILLO}  [!] CONFIGURACIÓN REQUERIDA EN LA MÁQUINA VIRTUAL CLIENTE [!]${RESET}"
-    echo -e "${VERDE}========================================================================${RESET}"
-    echo -e "La red de administración ha sido aislada en el segmento 1.1.1.1/24."
-    echo -e "Para conectarte a este servidor sin sufrir desconexiones al tocar el DHCP,"
-    echo -e "ejecuta estos comandos en tu VM Cliente sobre su interfaz"
-    echo -e "correspondiente a la red interna 2:\n"
-    
-    echo -e "  ${CIAN}sudo ip link set dev <INTERFAZ_CLIENTE> up${RESET}"
-    echo -e "  ${CIAN}sudo ip addr flush dev <INTERFAZ_CLIENTE>${RESET}"
-    echo -e "  ${CIAN}sudo ip addr add $ip_client/$cidr dev <INTERFAZ_CLIENTE>${RESET}\n"
-    
-    echo -e "Comando de conexión (ejecutar en el cliente una vez configurada la IP):"
-    echo -e "  ${AMARILLO}ssh ${SUDO_USER:-$USER}@$ip_server${RESET}"
-    echo -e "${VERDE}========================================================================${RESET}"
-    
+    # 3. Auditoría Inteligente: Polling en lugar de Sleep
+    echo -e "${CIAN}[*] Validando demonio SSH y conectividad de red...${RESET}"
+    local TIMEOUT=10
+    local CONTADOR=0
+    local LISTO=false
+
+    while [ $CONTADOR -lt $TIMEOUT ]; do
+        # Cuestionamos el estado del servicio Y si la interfaz realmente retuvo la IP
+        if systemctl is-active --quiet ssh && ip addr show "$interface" | grep -q "$ip_server"; then
+            LISTO=true
+            break
+        fi
+        sleep 1
+        ((CONTADOR++))
+    done
+
+    if [ "$LISTO" = true ]; then
+        echo -e "\n${VERDE}========================================================================${RESET}"
+        echo -e "${AMARILLO}  [!] CONFIGURACIÓN REQUERIDA EN LA MÁQUINA VIRTUAL CLIENTE [!]${RESET}"
+        echo -e "${VERDE}========================================================================${RESET}"
+        echo -e "La red de administración está operativa. Ejecuta en tu VM Cliente:\n"
+        echo -e "  ${CIAN}sudo ip link set dev <INTERFAZ_CLIENTE> up${RESET}"
+        echo -e "  ${CIAN}sudo ip addr flush dev <INTERFAZ_CLIENTE>${RESET}"
+        echo -e "  ${CIAN}sudo ip addr add $ip_client/$cidr dev <INTERFAZ_CLIENTE>${RESET}\n"
+        echo -e "Comando de conexión remoto:"
+        echo -e "  ${AMARILLO}ssh ${SUDO_USER:-$USER}@$ip_server${RESET}"
+        echo -e "${VERDE}========================================================================${RESET}"
+    else
+        log_error "Fallo crítico: El servicio SSH o la interfaz no se inicializaron a tiempo."
+    fi
     pausa
 }
 

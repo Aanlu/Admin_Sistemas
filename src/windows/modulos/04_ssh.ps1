@@ -5,7 +5,7 @@ function Configurar-Interfaz-SSH {
     Clear-Host
     Write-Host "--- DESPLIEGUE DE RED DE ADMINISTRACIÓN (OUT-OF-BAND) ---" -ForegroundColor Yellow
 
-    $interface = "Ethernet 3"
+    $interface = "Ethernet 2"
     $ip_server = "100.0.0.10"
     $ip_client = "100.0.0.11"
     $cidr = 24

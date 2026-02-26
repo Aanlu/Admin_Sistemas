@@ -81,17 +81,21 @@ obtener_ip_local() {
 
 capturar_ip() {
     local mensaje=$1
-    local ip_local=$(obtener_ip_local)
+    local ip_sugerida=$2 # Nuevo: Recibe una sugerencia dinámica
     local input_ip
 
     while true; do
-        read -p "$mensaje [Enter para usar: ${ip_local:-Ninguna}]: " input_ip
-        if [ -z "$input_ip" ] && [ -n "$ip_local" ]; then
-            input_ip="$ip_local"
+        if [ -n "$ip_sugerida" ]; then
+            read -p "$mensaje [Enter para usar: $ip_sugerida]: " input_ip
+            # Si da enter sin escribir, usamos la sugerida
+            [ -z "$input_ip" ] && input_ip="$ip_sugerida"
+        else
+            read -p "$mensaje: " input_ip
         fi
         
         if validar_formato_ip "$input_ip"; then
-            echo "$input_ip"
+            # Retornamos la IP normalizada (sin ceros octales)
+            echo $(normalizar_ip "$input_ip")
             return 0
         else
             log_error "IP inválida o prohibida. Intente de nuevo." >&2
@@ -131,4 +135,28 @@ confirmar_accion() {
     else
         return 1
     fi
+}
+
+INTERFAZ_SELECCIONADA=""
+
+seleccionar_interfaz_dinamica() {
+    # Extraemos las interfaces de forma 100% segura leyendo directamente el kernel
+    local arr_ifaces=($(ls -1 /sys/class/net | grep -v lo))
+    
+    if [ ${#arr_ifaces[@]} -eq 0 ]; then
+        log_error "No se detectaron interfaces de red en el sistema." >&2
+        return 1
+    fi
+
+    # Pasamos el nuevo nombre (arr_ifaces) al generador de menús
+    generar_menu "SELECCIONE LA INTERFAZ DE RED" arr_ifaces "Cancelar"
+    local eleccion=$?
+    
+    if [ $eleccion -eq ${#arr_ifaces[@]} ]; then 
+        return 1 # El usuario canceló
+    fi
+    
+    # Extraemos el valor correctamente
+    INTERFAZ_SELECCIONADA="${arr_ifaces[$eleccion]}"
+    return 0
 }

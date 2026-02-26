@@ -5,10 +5,13 @@ validar_formato_ip() {
     if [[ $ip =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
         IFS='.' read -r -a octetos <<< "$ip"
         for oct in "${octetos[@]}"; do
+            # Forzamos base 10 para evaluar el límite de 255
             local num=$((10#$oct))
             if [[ "$num" -lt 0 || "$num" -gt 255 ]]; then return 1; fi
         done
-        if [[ "$ip" == "0.0.0.0" || "$ip" == "255.255.255.255" || "$ip" == "127.0.0.1" ]]; then return 1; fi
+        
+        local ip_limpia=$(normalizar_ip "$ip")
+        if [[ "$ip_limpia" == "0.0.0.0" || "$ip_limpia" == "255.255.255.255" || "$ip_limpia" == "127.0.0.1" ]]; then return 1; fi
         return 0
     else
         return 1
@@ -71,4 +74,14 @@ incrementar_ip() {
         fi
     fi
     echo "$a.$b.$c.$d"
+}
+
+normalizar_ip() {
+    local ip_sucia=$1
+    if [[ $ip_sucia =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        IFS='.' read -r i1 i2 i3 i4 <<< "$ip_sucia"
+        echo "$((10#$i1)).$((10#$i2)).$((10#$i3)).$((10#$i4))"
+    else
+        echo "$ip_sucia"
+    fi
 }

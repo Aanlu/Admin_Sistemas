@@ -18,11 +18,12 @@ while true; do
     generar_menu "      MENÚ PRINCIPAL" opciones_principales "Salir del Sistema"
     eleccion=$?
 
+    # Al usar 'bash' en lugar de 'source', cada módulo nace y muere en su propia burbuja de memoria.
     case $eleccion in
-        0) source modulos/01_diagnostico.sh ;;
-        1) source modulos/02_dhcp.sh ;;
-        2) source modulos/03_dns.sh ;;
-        3) source modulos/04_ssh.sh ;;
+        0) bash modulos/01_diagnostico.sh ;;
+        1) bash modulos/02_dhcp.sh ;;
+        2) bash modulos/03_dns.sh ;;
+        3) bash modulos/04_ssh.sh ;;
         4) clear; echo -e "${VERDE}Cerrando sistema...${RESET}"; exit 0 ;;
     esac
 done

@@ -35,53 +35,58 @@ gestionar_instalacion() {
 }
 
 configurar_dhcp() {
-    clear
-    
     if ! dpkg -s isc-dhcp-server >/dev/null 2>&1; then
+        clear
         log_error "El servicio no está instalado. Ejecute 'Gestión de Instalación' primero."
         pausa; return
     fi
 
-    local interface="enp0s8"
+    seleccionar_interfaz_dinamica
+    if [ $? -ne 0 ]; then
+        log_warning "Configuración cancelada."
+        pausa; return
+    fi
+    
+    local interface="$INTERFAZ_SELECCIONADA"
     
     ip link set dev "$interface" up
     
     echo -e "${AMARILLO}--- CONFIGURACIÓN DEL ÁMBITO DHCP EN $interface ---${RESET}"
     read -p "Nombre del Ámbito (Scope): " scope
     
-    local ip_inicial
-    local red_dhcp
-    
-    while true; do
-        ip_inicial=$(capturar_ip "IP Estática del Servidor (Se asignará a $interface)")
-        red_dhcp=$(echo "$ip_inicial" | cut -d. -f1-3)
-        
-        if [ "$red_dhcp" == "172.16.99" ]; then
-            log_error "CONFLICTO DETECTADO: No puedes usar la red 172.16.99.x. Está reservada para SSH en enp0s9."
-        elif [ "$red_dhcp" == "10.0.2" ]; then
-            log_error "CONFLICTO DETECTADO: No puedes usar la red 10.0.2.x. Pertenece al NAT de VirtualBox (enp0s3)."
-        else
-            break
-        fi
-    done
+    local ip_inicial=$(capturar_ip "IP Inicial del servidor/rango DHCP")
+    local red_dhcp=$(obtener_id_red "$ip_inicial" "$(obtener_mascara "$ip_inicial")")
     
     local ip_final
     while true; do
-        read -p "IP Final del rango DHCP: " ip_final
-        if validar_formato_ip "$ip_final" && validar_rango "$ip_inicial" "$ip_final"; then
+        ip_final=$(capturar_ip "IP Final del rango DHCP")
+        if validar_rango "$ip_inicial" "$ip_final"; then
             break
         else
-            log_error "IP final inválida o fuera de rango."
+            log_error "La IP final debe ser mayor que la inicial ($ip_inicial)."
         fi
     done
 
     local ip_rango_inicio=$(incrementar_ip "$ip_inicial")
     local gw=$(capturar_ip_opcional "Gateway (Dejar en blanco si es red interna aislada)")
-    local dns=$(capturar_ip "Servidor DNS principal")
     
+    echo -e "\n${AZUL}[ Configuración de DNS ]${RESET}"
+    local dns_primario=$(capturar_ip "Servidor DNS Principal" "$ip_inicial")
+    local dns_secundario=$(capturar_ip_opcional "Servidor DNS Secundario (Dejar en blanco para omitir)")
+    
+    local string_dns=""
+    if [ -n "$dns_primario" ]; then
+        if [ -n "$dns_secundario" ]; then
+            string_dns="option domain-name-servers $dns_primario, $dns_secundario;"
+        else
+            string_dns="option domain-name-servers $dns_primario;"
+        fi
+    fi
+
     local lease_time
     while true; do
-        read -p "Tiempo de concesión (segundos): " lease_time
+        read -p "Tiempo de concesión (segundos) [Enter para usar 86400]: " lease_time
+        [ -z "$lease_time" ] && lease_time=86400
         if [[ "$lease_time" =~ ^[0-9]+$ ]] && [ "$lease_time" -gt 0 ]; then break; fi
         log_error "Debe ser un número entero positivo."
     done
@@ -102,7 +107,7 @@ authoritative;
 subnet $subnet netmask $mascara {
     range $ip_rango_inicio $ip_final;
     $( [ ! -z "$gw" ] && echo "option routers $gw;" )
-    $( [ ! -z "$dns" ] && echo "option domain-name-servers $dns;" )
+    $string_dns
     option domain-name "$scope";
 }
 EOL
@@ -116,9 +121,34 @@ EOL
     
     if systemctl is-active --quiet isc-dhcp-server; then
         log_ok "Servicio Configurado y ACTIVO en $interface."
-        echo -e "${VERDE}La red DHCP es independiente y tu sesión SSH en enp0s9 está protegida.${RESET}"
+        
+        # --- INICIO DEL BYPASS CORREGIDO ---
+        echo -e "${CIAN}Forzando resolución DNS local hacia $dns_primario (Bypass systemd-resolved)...${RESET}"
+        
+        # 1. Ajustamos las reglas globales de systemd-resolved con la IP y bloqueamos dominios externos
+        sed -i -E "s/^#?DNS=.*/DNS=$dns_primario/" /etc/systemd/resolved.conf
+        sed -i -E 's/^#?Domains=.*/Domains=~./' /etc/systemd/resolved.conf
+        sed -i -E 's/^#?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+        
+        # 2. Reiniciamos el demonio para que asimile los cambios
+        systemctl restart systemd-resolved
+        
+        # 3. Forzamos a la interfaz específica a usar este DNS (evita fugas hacia otras interfaces)
+        resolvectl dns "$interface" "$dns_primario" 2>/dev/null || true
+        
+        # 4. Destruimos el enlace dinámico si existe y creamos el archivo estático
+        if [ -L /etc/resolv.conf ]; then
+            rm -f /etc/resolv.conf
+        fi
+        
+        cat > /etc/resolv.conf <<EOF
+nameserver $dns_primario
+EOF
+        log_ok "El servidor ahora resolverá localmente a través de $dns_primario."
+        # --- FIN DEL BYPASS CORREGIDO ---
+
     else
-        log_error "Fallo al iniciar el servicio DHCP. Revise los logs del sistema."
+        log_error "Fallo al iniciar el servicio DHCP. Ejecute: journalctl -xeu isc-dhcp-server.service"
     fi
     pausa
 }

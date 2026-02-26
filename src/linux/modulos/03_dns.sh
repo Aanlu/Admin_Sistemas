@@ -3,6 +3,12 @@
 source libs/utils.sh
 source libs/validaciones.sh
 
+# Variables Globales (Es seguro declararlas aquí)
+TEMPLATE_ZONA="../../templates/linux/db.zona.templates"
+CONF_LOCAL="/etc/bind/named.conf.local"
+DIR_ZONAS="/var/cache/bind"
+ZONA_SELECCIONADA=""
+
 verificar_ip_fija() {
     clear
     echo -e "${AMARILLO}--- VERIFICACIÓN DE RED ESTÁTICA ---${RESET}"
@@ -46,20 +52,23 @@ verificar_ip_fija() {
     pausa
 }
 
-verificar_ip_fija
+inicializar_modulo() {
+    clear
+    echo -e "${AMARILLO}--- VERIFICANDO DEPENDENCIAS DEL MÓDULO DNS ---${RESET}"
+    
+    [ ! -d "$DIR_ZONAS" ] && mkdir -p "$DIR_ZONAS"
 
-instalar_dependencia_silenciosa "bind9" || { log_error "Fallo al instalar bind9."; pausa; exit 1; }
-instalar_dependencia_silenciosa "bind9utils" || { log_error "Fallo al instalar bind9utils."; pausa; exit 1; }
-instalar_dependencia_silenciosa "bind9-doc" || { log_error "Fallo al instalar bind9-doc."; pausa; exit 1; }
-instalar_dependencia_silenciosa "dnsutils" || { log_error "Fallo al instalar dnsutils."; pausa; exit 1; }
-
-TEMPLATE_ZONA="../../templates/linux/db.zona.templates"
-CONF_LOCAL="/etc/bind/named.conf.local"
-DIR_ZONAS="/var/cache/bind"
-
-[ ! -d "$DIR_ZONAS" ] && mkdir -p "$DIR_ZONAS"
-
-ZONA_SELECCIONADA=""
+    if ! dpkg -s bind9 >/dev/null 2>&1; then
+        log_info "Instalando paquetes base para BIND9..."
+        instalar_dependencia_silenciosa "bind9" || { log_error "Fallo al instalar bind9."; return 1; }
+        instalar_dependencia_silenciosa "bind9utils" || { log_error "Fallo al instalar bind9utils."; return 1; }
+        instalar_dependencia_silenciosa "bind9-doc" || { log_error "Fallo al instalar bind9-doc."; return 1; }
+        instalar_dependencia_silenciosa "dnsutils" || { log_error "Fallo al instalar dnsutils."; return 1; }
+        log_ok "Dependencias instaladas correctamente."
+        pausa
+    fi
+    return 0
+}
 
 seleccionar_zona() {
     local zonas=()
@@ -87,6 +96,44 @@ seleccionar_zona() {
     fi
 }
 
+forzar_resolucion_local() {
+    local dns_ip="$1"
+
+    if [[ -z "$dns_ip" ]]; then
+        log_error "No se proporcionó una IP válida al módulo de resolución."
+        return 1
+    fi
+
+    local interface=$(ip -o addr show | grep "$dns_ip" | awk '{print $2}' | head -n 1)
+
+    if [[ -z "$interface" ]]; then
+        log_warning "No se pudo mapear la IP $dns_ip a una interfaz física. Omitiendo bind estricto."
+    else
+        log_info "Asegurando enrutamiento DNS hacia BIND9 ($dns_ip) en la interfaz $interface..."
+    fi
+
+    sed -i -E "s/^#?DNS=.*/DNS=$dns_ip/" /etc/systemd/resolved.conf
+    sed -i -E 's/^#?Domains=.*/Domains=~./' /etc/systemd/resolved.conf
+    sed -i -E 's/^#?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+    
+    systemctl restart systemd-resolved
+
+    if [[ -n "$interface" ]]; then
+        resolvectl dns "$interface" "$dns_ip" 2>/dev/null || true
+    fi
+
+    if [ -L /etc/resolv.conf ]; then
+        rm -f /etc/resolv.conf
+    fi
+    
+    cat > /etc/resolv.conf <<EOF
+# Archivo generado estáticamente por el módulo DNS
+nameserver $dns_ip
+EOF
+
+    log_ok "Resolución local blindada. BIND9 ($dns_ip) tiene el control absoluto."
+}
+
 crear_zona() {
     clear
     echo -e "${AMARILLO}--- CREACIÓN DE ZONA DNS ---${RESET}"
@@ -94,8 +141,6 @@ crear_zona() {
     if systemctl is-active --quiet bind9; then
         log_info "Servicio BIND9 detectado y operando en segundo plano."
     fi
-
-   
 
     local dominio
     while true; do
@@ -116,7 +161,8 @@ crear_zona() {
         pausa; return
     fi
 
-    local ip_server=$(capturar_ip "IP del Servidor para registros raíz y subdominios")
+    local ip_sugerida=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v "127.0.0.1" | head -n 1)
+    local ip_server=$(capturar_ip "IP del Servidor para registros raíz y subdominios" "$ip_sugerida")
 
     cp "$TEMPLATE_ZONA" "$archivo_zona"
     sed -i "s/@@DOMINIO@@/$dominio/g" "$archivo_zona"
@@ -133,6 +179,7 @@ EOF
 
     if named-checkconf >/dev/null 2>&1 && named-checkzone "$dominio" "$archivo_zona" >/dev/null 2>&1; then
         systemctl restart bind9
+        forzar_resolucion_local "$ip_server"
         log_ok "Zona de dominio generada y cargada exitosamente."
     else
         log_error "Error de sintaxis en el archivo. Se requiere revisión manual."
@@ -201,9 +248,7 @@ agregar_registro() {
         log_warning "El host indicado ya existe en esta zona."
         if confirmar_accion "¿Desea ACTUALIZAR la IP de este registro existente?"; then
             cp "$archivo_zona" "$archivo_zona.bak"
-            
             sed -i -E "/^${host}[[:space:]]+IN[[:space:]]+A/d" "$archivo_zona"
-            
             [ -n "$(tail -c 1 "$archivo_zona")" ] && echo "" >> "$archivo_zona"
             echo "$host   IN   A   $ip_host" >> "$archivo_zona"
             
@@ -303,7 +348,7 @@ validar_resolucion() {
     fi
 
     echo -e "\n${AZUL}Fase 2: Prueba de Resolución local mediante nslookup...${RESET}"
-    nslookup "$dominio" 127.0.0.1 || log_error "Fallo en la resolución del servidor de nombres."
+    nslookup "$dominio" || log_error "Fallo en la resolución del servidor de nombres."
 
     echo -e "\n${AZUL}Fase 3: Prueba de Conectividad de red hacia el subdominio web...${RESET}"
     ping -c 3 "www.$dominio" || log_warning "Paquetes perdidos. Posible bloqueo de cortafuegos ICMP o equipo apagado."
@@ -351,18 +396,13 @@ modificar_nombre_zona() {
     fi
 
     if confirmar_accion "¿Confirma la migración de $dominio_viejo hacia $dominio_nuevo?"; then
-
         cp "$archivo_viejo" "$archivo_nuevo"
-        
         sed -i "s/$dominio_viejo/$dominio_nuevo/g" "$archivo_nuevo"
         
-
         sed -i "s/zone \"$dominio_viejo\"/zone \"$dominio_nuevo\"/g" "$CONF_LOCAL"
         sed -i "s/db.$dominio_viejo/db.$dominio_nuevo/g" "$CONF_LOCAL"
         
-
         if named-checkconf >/dev/null 2>&1 && named-checkzone "$dominio_nuevo" "$archivo_nuevo" >/dev/null 2>&1; then
-
             rm -f "$archivo_viejo"
             systemctl restart bind9
             log_ok "Migración exitosa. La zona ahora opera como $dominio_nuevo"
@@ -377,6 +417,7 @@ modificar_nombre_zona() {
     fi
     pausa
 }
+
 eliminar_zona() {
     seleccionar_zona
     local estado=$?
@@ -388,14 +429,11 @@ eliminar_zona() {
 
     clear
     echo -e "${AMARILLO}--- DESTRUCCIÓN DE ZONA DNS: $dominio ---${RESET}"
-    
     echo -e "${ROJO}¡ADVERTENCIA! Esta acción destruirá el archivo físico y desconectará la zona del orquestador.${RESET}"
     
     if confirmar_accion "¿Está absolutamente seguro de ELIMINAR toda la zona '$dominio'?"; then
         rm -f "$archivo_zona"
-        
         sed -i "/zone \"$dominio\" {/,/};/d" "$CONF_LOCAL"
-        
         systemctl restart bind9
         log_ok "La zona $dominio y todos sus registros han sido aniquilados del servidor."
     else
@@ -405,6 +443,17 @@ eliminar_zona() {
 }
 
 menu_dns() {
+    # 1. Ejecutamos la verificación de red
+    verificar_ip_fija
+    
+    # 2. Inicializamos el módulo ANTES de dibujar el menú
+    inicializar_modulo
+    if [ $? -ne 0 ]; then
+        log_error "El módulo DNS no pudo inicializarse correctamente. Saliendo..."
+        pausa
+        return 1
+    fi
+
     local opciones_dns=(
         "Crear Nueva Zona DNS"
         "Listar Registros de Zona"
@@ -432,4 +481,5 @@ menu_dns() {
     done
 }
 
+# Solo ejecutamos el menú principal
 menu_dns
