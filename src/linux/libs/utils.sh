@@ -42,7 +42,7 @@ generar_menu() {
     local texto_salida=$3
     local opciones=("${opciones_ref[@]}" "$texto_salida")
     local seleccion=0
-
+    local i
     while true; do
         clear
         echo "================================================="

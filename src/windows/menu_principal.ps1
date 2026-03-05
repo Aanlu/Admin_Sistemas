@@ -12,6 +12,8 @@ $OpcionesPrincipales = @(
     "Diagnóstico de Red",
     "Configuración Servidor DHCP",
     "Configuración Servidor DNS"
+    "SSH"
+    "FTP"
 )
 
 while ($true) {
@@ -22,7 +24,8 @@ while ($true) {
         1 { . .\modulos\02_dhcp.ps1 }
         2 { . .\modulos\03_dns.ps1 }
         3 { . .\modulos\04_ssh.ps1 }
-        4 { 
+        4 { . .\modulos\05_ftp.ps1 }
+        5 { 
             Clear-Host
             Write-Host "Cerrando sistema..." -ForegroundColor Green
             exit 

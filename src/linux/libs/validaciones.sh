@@ -85,3 +85,30 @@ normalizar_ip() {
         echo "$ip_sucia"
     fi
 }
+capturar_entero() {
+    local mensaje=$1
+    local input_num
+    while true; do
+        read -p "$mensaje: " input_num
+        if [[ "$input_num" =~ ^[1-9][0-9]{0,2}$ ]]; then
+            echo "$input_num"
+            return 0
+        else
+            log_error "Entrada inválida. Debe ser un número entero mayor a 0." >&2
+        fi
+    done
+}
+
+capturar_usuario_seguro() {
+    local mensaje=$1
+    local input_str
+    while true; do
+        read -p "$mensaje: " input_str
+        if [[ "$input_str" =~ ^[a-z_][a-z0-9_-]{1,31}$ ]]; then
+            echo "$input_str"
+            return 0
+        else
+            log_error "Nombre inválido. Use solo minúsculas y números (sin espacios)." >&2
+        fi
+    done
+}

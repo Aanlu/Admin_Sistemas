@@ -18,6 +18,39 @@ function Seleccionar-Zona {
     return 0
 }
 
+function Forzar-ResolucionLocal {
+    param(
+        [string]$DnsIP
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DnsIP)) {
+        Log-Error "No se proporcionó una IP válida al módulo de resolución."
+        return
+    }
+
+    # Truco analítico: Averiguamos qué interfaz de red tiene asignada esta IP
+    $ipObj = Get-NetIPAddress -IPAddress $DnsIP -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
+    $interface = if ($ipObj) { $ipObj.InterfaceAlias } else { $null }
+
+    if (-not $interface) {
+        Log-Warning "No se pudo mapear la IP $DnsIP a una interfaz física. Omitiendo bind estricto."
+        return
+    }
+
+    Log-Info "Asegurando enrutamiento DNS hacia el Servidor Local ($DnsIP) en la interfaz '$interface'..."
+
+    try {
+        # 1. Obligamos a la tarjeta de red a consultar EXCLUSIVAMENTE a nuestro servidor DNS local
+        Set-DnsClientServerAddress -InterfaceAlias $interface -ServerAddresses $DnsIP -ErrorAction Stop
+        
+        # 2. Purgamos la caché DNS de Windows (El equivalente a destruir el intermediario)
+        Clear-DnsClientCache
+        
+        Log-Ok "Resolución local blindada. DNS Windows ($DnsIP) tiene el control absoluto en '$interface'."
+    } catch {
+        Log-Error "Error al forzar el DNS: $($_.Exception.Message)"
+    }
+}
 function Crear-Zona {
     Clear-Host
     Write-Host "--- CREACIÓN DE ZONA DNS ---" -ForegroundColor Yellow
@@ -46,16 +79,21 @@ function Crear-Zona {
 
     $ip_server = Capturar-IP "IP del Servidor para registros raíz y subdominios"
 
-    try {
+   try {
         Add-DnsServerPrimaryZone -Name $dominio -ZoneFile "$dominio.dns" -ErrorAction Stop
         Add-DnsServerResourceRecordA -Name "@" -IPv4Address $ip_server -ZoneName $dominio -ErrorAction SilentlyContinue
         Add-DnsServerResourceRecordA -Name "ns1" -IPv4Address $ip_server -ZoneName $dominio -ErrorAction SilentlyContinue
+        
+        # AQUÍ ESTÁ EL CAMBIO: Forzamos la resolución a la IP que el usuario eligió
+        Forzar-ResolucionLocal -DnsIP $ip_server
+
         Log-Ok "Zona de dominio generada y cargada exitosamente."
     } catch {
         Log-Error "Error de sintaxis (Estructural): $($_.Exception.Message)"
     }
     Pausa
 }
+
 
 function Leer-Zona {
     $estado = Seleccionar-Zona

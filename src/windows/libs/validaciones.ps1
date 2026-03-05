@@ -1,21 +1,11 @@
 ﻿function Validar-Formato-IP {
-    param([string]$ip)
-    
-    if ($ip -notmatch "^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$") { 
-        return $false 
-    }
-    $octetos = $ip.Split('.')
-    foreach ($oct in $octetos) {
-        if ([int]$oct -lt 0 -or [int]$oct -gt 255) { return $false }
-    }
-
+    param($ip)
     $ipsProhibidas = @("0.0.0.0", "255.255.255.255", "127.0.0.0", "127.0.0.1")
-    
-    $ip_limpia = "{0}.{1}.{2}.{3}" -f [int]$octetos[0], [int]$octetos[1], [int]$octetos[2], [int]$octetos[3]
-
-    if ($ipsProhibidas -contains $ip_limpia) { return $false }
-    
-    return $true
+    if ([System.Net.IPAddress]::TryParse($ip, [ref]$null)) {
+        if ($ipsProhibidas -contains $ip) { return $false }
+        return $true
+    }
+    return $false
 }
 
 function Validar-Rango {
@@ -61,4 +51,28 @@ function Obtener-ID-Red {
     $netBytes = [byte[]]::new(4)
     for($i=0; $i -lt 4; $i++) { $netBytes[$i] = $ipBytes[$i] -band $maskBytes[$i] }
     return ([System.Net.IPAddress]::new($netBytes)).IPAddressToString
+}
+
+function Capturar-Entero {
+    param([string]$Mensaje)
+    while ($true) {
+        $input_num = Read-Host "$Mensaje"
+        if ($input_num -match "^[1-9][0-9]{0,2}$") {
+            return [int]$input_num
+        } else {
+            Log-Error "Entrada inválida. Debe ser un número entero mayor a 0."
+        }
+    }
+}
+
+function Capturar-UsuarioSeguro {
+    param([string]$Mensaje)
+    while ($true) {
+        $input_str = Read-Host "$Mensaje"
+        if ($input_str -match "^[a-z_][a-z0-9_-]{1,31}$") {
+            return $input_str
+        } else {
+            Log-Error "Nombre inválido. Use solo minúsculas y números (sin espacios)."
+        }
+    }
 }

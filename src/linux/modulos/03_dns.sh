@@ -3,7 +3,7 @@
 source libs/utils.sh
 source libs/validaciones.sh
 
-# Variables Globales (Es seguro declararlas aquí)
+# Variables Globales
 TEMPLATE_ZONA="../../templates/linux/db.zona.templates"
 CONF_LOCAL="/etc/bind/named.conf.local"
 DIR_ZONAS="/var/cache/bind"
