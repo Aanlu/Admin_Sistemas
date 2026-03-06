@@ -39,6 +39,11 @@ function Gestionar-InstalacionFTP {
 
     Write-Host "[*] Configurando bóvedas físicas, túneles anónimos y reglas NTFS..." -ForegroundColor Cyan
     
+    # --- ARREGLO 1: CREACIÓN DE GRUPO EXCLUSIVO PARA AUTENTICADOS ---
+    if (-not (Get-LocalGroup -Name "FTP_Auth_Users" -ErrorAction SilentlyContinue)) {
+        New-LocalGroup -Name "FTP_Auth_Users" -Description "Usuarios FTP con permisos de escritura" | Out-Null
+    }
+
     if (-not (Test-Path "$DIR_FTP_ROOT\LocalUser")) {
         New-Item -Path "$DIR_FTP_ROOT\LocalUser" -ItemType Directory -Force | Out-Null
     }
@@ -48,26 +53,27 @@ function Gestionar-InstalacionFTP {
     }
 
     if (Test-Path "$DIR_FTP_ROOT\LocalUser\Public") {
-        Remove-Item -Path "$DIR_FTP_ROOT\LocalUser\Public" -Force -Recurse -ErrorAction SilentlyContinue
+        cmd.exe /c "rd /s /q `"$DIR_FTP_ROOT\LocalUser\Public`" 2>nul"
     }
     New-Item -ItemType Junction -Path "$DIR_FTP_ROOT\LocalUser\Public" -Target "$DIR_FTP_MASTER\general" | Out-Null
 
     $SidSys = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18') 
     $SidAdm = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544') 
-    $SidUsr = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545') 
     $IusrAccount = New-Object System.Security.Principal.NTAccount("IUSR")
     $IisIusrsAccount = New-Object System.Security.Principal.NTAccount("IIS_IUSRS")
+    $GrpAuthAccount = New-Object System.Security.Principal.NTAccount("FTP_Auth_Users")
 
     $AclRoot = Get-Acl $DIR_FTP_ROOT
-    # FORZADO DE JAULA: Retiramos el permiso ReadAndExecute a 'Users'. Si la jaula falla, NTFS bloqueará la vista.
     $AclRoot.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($IisIusrsAccount, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
     Set-Acl -Path $DIR_FTP_ROOT -AclObject $AclRoot
 
+    # --- ARREGLO 1 (CONT.): PERMISOS NTFS BLINDADOS ---
+    # Solo "FTP_Auth_Users" puede escribir. "IUSR" (Anónimo) queda atrapado en Solo Lectura.
     $AclGeneral = Get-Acl "$DIR_FTP_MASTER\general"
     $AclGeneral.SetAccessRuleProtection($true, $false)
     $AclGeneral.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSys, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
     $AclGeneral.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidAdm, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
-    $AclGeneral.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidUsr, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
+    $AclGeneral.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($GrpAuthAccount, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
     $AclGeneral.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($IusrAccount, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
     Set-Acl -Path "$DIR_FTP_MASTER\general" -AclObject $AclGeneral
 
@@ -77,18 +83,19 @@ function Gestionar-InstalacionFTP {
     Get-Website | Where-Object { $_.Bindings.Collection.BindingInformation -match ":21:" -and $_.Name -ne $SITE_NAME } | Stop-Website -ErrorAction SilentlyContinue
     cmd.exe /c "$appcmd delete site $SITE_NAME >nul 2>&1"
     
+    & $appcmd set config /section:system.ftpServer/firewallSupport /lowDataChannelPort:40000 /highDataChannelPort:40100 /commit:apphost
+    
     & $appcmd add site /name:$SITE_NAME /bindings:ftp://*:21 /physicalPath:$DIR_FTP_ROOT
     
     & $appcmd set site $SITE_NAME "/ftpServer.security.ssl.controlChannelPolicy:SslAllow" "/ftpServer.security.ssl.dataChannelPolicy:SslAllow"
     & $appcmd set site $SITE_NAME "/ftpServer.security.authentication.basicAuthentication.enabled:true"
     & $appcmd set site $SITE_NAME "/ftpServer.security.authentication.anonymousAuthentication.enabled:true"
-    
-    # --- CAMBIO CRÍTICO: CHROOT PERFECTO ---
-    # IsolateRootDirectoryOnly es el enum exacto de IIS que atrapa al usuario en LocalUser\Usuario
     & $appcmd set site $SITE_NAME "/ftpServer.userIsolation.mode:IsolateRootDirectoryOnly"
     
+    # --- ARREGLO 1 (CONT.): POLÍTICAS IIS BLINDADAS ---
+    # Autenticados (*) leen y escriben. Anónimos (?) SOLO leen.
     & $appcmd set config $SITE_NAME "/section:system.ftpServer/security/authorization" "/+`"[accessType='Allow',users='*',permissions='Read,Write']`"" /commit:apphost
-    & $appcmd set config $SITE_NAME "/section:system.ftpServer/security/authorization" "/+`"[accessType='Allow',users='?',permissions='Read,Write']`"" /commit:apphost
+    & $appcmd set config $SITE_NAME "/section:system.ftpServer/security/authorization" "/+`"[accessType='Allow',users='?',permissions='Read']`"" /commit:apphost
 
     Restart-Service ftpsvc -ErrorAction SilentlyContinue
     Stop-Transcript
@@ -145,80 +152,103 @@ function Seleccionar-CrearGrupoFTP {
 }
 
 function Procesar-UsuarioFTP {
-    param([string]$Usuario, [string]$Password, [string]$Grupo)
+    param([string]$Usuario, [string]$Password, [string]$Grupo)
 
-    $usrFisico = "$global:DIR_FTP_ROOT\LocalUser\$Usuario"
-    $SecurePass = ConvertTo-SecureString $Password -AsPlainText -Force
+    $usrFisico = "$global:DIR_FTP_ROOT\LocalUser\$Usuario"
+    $SecurePass = ConvertTo-SecureString $Password -AsPlainText -Force
 
-    $usrObj = Get-LocalUser -Name $Usuario -ErrorAction SilentlyContinue
+    $usrObj = Get-LocalUser -Name $Usuario -ErrorAction SilentlyContinue
 
-    if ($usrObj) {
-        Log-Info "Usuario existente. Sincronizando contraseña y asegurando membresía..."
-        Set-LocalUser -Name $Usuario -Password $SecurePass -ErrorAction SilentlyContinue
-        Add-LocalGroupMember -Group $Grupo -Member $Usuario -ErrorAction SilentlyContinue
-    } else {
-        Write-Host "Creando usuario local: $Usuario ($Grupo)..." -ForegroundColor Cyan
-        try {
-            New-LocalUser -Name $Usuario -Password $SecurePass -PasswordNeverExpires -UserMayNotChangePassword -Description "Usuario FTP Automatizado" -ErrorAction Stop | Out-Null
-            Add-LocalGroupMember -Group $Grupo -Member $Usuario -ErrorAction SilentlyContinue
-            
-            $GrupoUsuarios = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')).Translate([System.Security.Principal.NTAccount]).Value
-            Add-LocalGroupMember -Group $GrupoUsuarios -Member $Usuario -ErrorAction SilentlyContinue
+    if ($usrObj) {
+        Log-Info "Usuario existente. Sincronizando contraseña y asegurando membresía..."
+        Set-LocalUser -Name $Usuario -Password $SecurePass -ErrorAction SilentlyContinue
+        Add-LocalGroupMember -Group $Grupo -Member $Usuario -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "Creando usuario local: $Usuario ($Grupo)..." -ForegroundColor Cyan
+        try {
+            New-LocalUser -Name $Usuario -Password $SecurePass -PasswordNeverExpires -UserMayNotChangePassword -Description "Usuario FTP Automatizado" -ErrorAction Stop | Out-Null
+            Add-LocalGroupMember -Group $Grupo -Member $Usuario -ErrorAction SilentlyContinue
+            
+            $GrupoUsuarios = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')).Translate([System.Security.Principal.NTAccount]).Value
+            Add-LocalGroupMember -Group $GrupoUsuarios -Member $Usuario -ErrorAction SilentlyContinue
+            Add-LocalGroupMember -Group "IIS_IUSRS" -Member $Usuario -ErrorAction SilentlyContinue
+            
+            # --- INSCRIPCIÓN AL GRUPO SEGURO ---
+            Add-LocalGroupMember -Group "FTP_Auth_Users" -Member $Usuario -ErrorAction SilentlyContinue
+        } catch {
+            Log-Error "Fallo crítico al crear a '$Usuario'. Detalle del error: $_"
+            return 
+        }
+    }
 
-            Add-LocalGroupMember -Group "IIS_IUSRS" -Member $Usuario -ErrorAction SilentlyContinue
-        } catch {
-            Log-Error "Fallo crítico al crear a '$Usuario'. Detalle del error: $_"
-            return 
-        }
-    }
+    # --- LÓGICA DE MIGRACIÓN TIPO LINUX (Borrado de Fantasmas) ---
+    if (Test-Path $usrFisico) {
+        $carpetas = Get-ChildItem -Path $usrFisico -Directory
+        foreach ($carpeta in $carpetas) {
+            $nombreCarpeta = $carpeta.Name
+            
+            # Identificamos si es un grupo antiguo. Conservamos 'general', la carpeta privada y el grupo actual.
+            if ($nombreCarpeta -ne "general" -and $nombreCarpeta -ne $Usuario -and $nombreCarpeta -ne $Grupo) {
+                # ARREGLO DESTRUCTIVO: cmd.exe nativo es inmune a los errores de ruta de PowerShell con Junctions
+                cmd.exe /c "rmdir `"$($carpeta.FullName)`" 2>nul"
+                Remove-LocalGroupMember -Group $nombreCarpeta -Member $Usuario -ErrorAction SilentlyContinue
+                Write-Host "[-] El túnel visual y el acceso al grupo '$nombreCarpeta' han sido destruidos." -ForegroundColor DarkYellow
+            }
+        }
+    }
 
-    # --- CAMBIO CRÍTICO: LÓGICA DE MIGRACIÓN TIPO LINUX (Borrado de Fantasmas) ---
-    if (Test-Path $usrFisico) {
-        $carpetas = Get-ChildItem -Path $usrFisico -Directory
-        foreach ($carpeta in $carpetas) {
-            $nombreCarpeta = $carpeta.Name
-            
-            # Identificamos si es un grupo antiguo. Conservamos 'general', la carpeta del '$Usuario' y el '$Grupo' actual.
-            if ($nombreCarpeta -ne "general" -and $nombreCarpeta -ne $Usuario -and $nombreCarpeta -ne $Grupo) {
-                
-                # 1. ARREGLO DESTRUCTIVO: Usamos rmdir nativo para destrozar el Junction sin que PowerShell evalúe su contenido.
-                # Esto garantiza que visualmente DESAPAREZCA del cliente FTP.
-                cmd.exe /c "rmdir `"$($carpeta.FullName)`" 2>nul"
-                
-                # 2. Sacamos al usuario del grupo viejo en Windows para revocarle el NTFS
-                Remove-LocalGroupMember -Group $nombreCarpeta -Member $Usuario -ErrorAction SilentlyContinue
-                
-                Write-Host "[-] El túnel visual y el acceso al grupo '$nombreCarpeta' han sido destruidos." -ForegroundColor DarkYellow
-            }
-        }
-    }
+    # Creación de la carpeta raíz de la jaula (Si no existe)
+    if (-not (Test-Path $usrFisico)) {
+        New-Item -Path $usrFisico -ItemType Directory -Force | Out-Null
+    }
+    
+    # --- BLINDAJE 1: LA RAÍZ ESTÉRIL (SOLO LECTURA) ---
+    $SidSys = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+    $AclUsr = Get-Acl $usrFisico
+    $AclUsr.SetAccessRuleProtection($true, $false)
+    $UsrAccount = New-Object System.Security.Principal.NTAccount($Usuario)
+    
+    # ARREGLO CRÍTICO: El usuario solo puede Leer y Ejecutar en su raíz. NO PUEDE BORRAR TÚNELES.
+    $AclUsr.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($UsrAccount, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+    $AclUsr.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSys, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+    Set-Acl -Path $usrFisico -AclObject $AclUsr
 
-    # Creación de la carpeta estructural privada con el nombre del usuario
-    if (-not (Test-Path "$usrFisico\$Usuario")) {
-        New-Item -Path "$usrFisico\$Usuario" -ItemType Directory -Force | Out-Null
-    }
-    
-    $SidSys = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
-    $AclUsr = Get-Acl $usrFisico
-    $AclUsr.SetAccessRuleProtection($true, $false)
-    $UsrAccount = New-Object System.Security.Principal.NTAccount($Usuario)
-    
-    $AclUsr.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($UsrAccount, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
-    $AclUsr.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSys, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
-    Set-Acl -Path $usrFisico -AclObject $AclUsr
+    # --- BLINDAJE 2: LA CARPETA PRIVADA (MODIFICABLE PERO INDESTRUCTIBLE EN RAÍZ) ---
+    $Privada = "$usrFisico\$Usuario"
+    if (-not (Test-Path $Privada)) {
+        New-Item -Path $Privada -ItemType Directory -Force | Out-Null
+    }
+    $AclPrivada = Get-Acl $Privada
+    $AclPrivada.SetAccessRuleProtection($true, $false) # Rompemos la herencia de "Solo Lectura" de la raíz
+    
+    # 1. Regla del Sistema
+    $AclPrivada.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($SidSys, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+    
+    # 2. EL PARCHE DE AUTO-SABOTAJE (DENEGACIÓN EXPLÍCITA)
+    # Denegamos "Delete" solo a ESTA carpeta exacta para que el usuario no pueda borrarla en FileZilla.
+    $AclPrivada.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($UsrAccount, "Delete", "None", "None", "Deny")))
+    
+    # 3. Le devolvemos el poder de Modificar (Leer, Escribir, Borrar el contenido interno de la carpeta)
+    $AclPrivada.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($UsrAccount, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
+    
+    Set-Acl -Path $Privada -AclObject $AclPrivada
 
-    # UNIONES (Junctions)
-    $JunctionGeneral = "$usrFisico\general"
-    if (-not (Test-Path $JunctionGeneral)) {
-        New-Item -ItemType Junction -Path $JunctionGeneral -Target "$global:DIR_FTP_MASTER\general" | Out-Null
-    }
+    # UNIONES (Junctions)
+    $JunctionGeneral = "$usrFisico\general"
+    if (-not (Test-Path $JunctionGeneral)) {
+        New-Item -ItemType Junction -Path $JunctionGeneral -Target "$global:DIR_FTP_MASTER\general" | Out-Null
+    }
 
-    $JunctionGrupo = "$usrFisico\$Grupo"
-    if (-not (Test-Path $JunctionGrupo)) {
-        New-Item -ItemType Junction -Path $JunctionGrupo -Target "$global:DIR_FTP_MASTER\$Grupo" | Out-Null
-    }
+    $JunctionGrupo = "$usrFisico\$Grupo"
+    if (-not (Test-Path $JunctionGrupo)) {
+        New-Item -ItemType Junction -Path $JunctionGrupo -Target "$global:DIR_FTP_MASTER\$Grupo" | Out-Null
+    }
 
-    Log-Ok "Usuario $Usuario estructurado perfectamente. Túneles sincronizados y jaula sellada."
+    # --- ARREGLO 3: ANIQUILACIÓN DEL CACHÉ LSA DE WINDOWS ---
+    # Para que el cambio de grupo (Token NTFS) tome efecto inmediato y evitar el error 550.
+    Restart-Service ftpsvc -Force -ErrorAction SilentlyContinue
+
+    Log-Ok "Usuario $Usuario estructurado perfectamente. Jaula estéril sellada y caché LSA purgada."
 }
 
 function Gestionar-UsuariosFTP {
@@ -268,10 +298,12 @@ function Resetear-EntornoFTP {
             }
         }
 
-        if (Test-Path $DIR_FTP_ROOT) { Remove-Item -Path $DIR_FTP_ROOT -Recurse -Force -ErrorAction SilentlyContinue }
-        if (Test-Path $DIR_FTP_MASTER) { Remove-Item -Path $DIR_FTP_MASTER -Recurse -Force -ErrorAction SilentlyContinue }
+        Remove-LocalGroup -Name "FTP_Auth_Users" -ErrorAction SilentlyContinue
 
-        Log-Ok "El entorno IIS FTP fue purgado."
+        if (Test-Path $DIR_FTP_ROOT) { cmd.exe /c "rd /s /q `"$DIR_FTP_ROOT`" 2>nul" }
+        if (Test-Path $DIR_FTP_MASTER) { cmd.exe /c "rd /s /q `"$DIR_FTP_MASTER`" 2>nul" }
+
+        Log-Ok "El entorno IIS FTP fue purgado de manera segura."
     }
     Pausa
 }
