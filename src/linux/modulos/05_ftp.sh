@@ -1,9 +1,14 @@
 #!/bin/bash
 
-source libs/utils.sh
-source libs/validaciones.sh
+# Resolución de ruta absoluta: obtiene la carpeta actual (modulos)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Subimos un nivel (../) para salir de 'modulos' y luego entramos a 'libs'
+source "$SCRIPT_DIR/../libs/utils.sh"
+source "$SCRIPT_DIR/../libs/validaciones.sh"
 
 DIR_FTP_MASTER="/var/ftp_master"
+# ... el resto del script continúa igual ...
 CONF_FTP="/etc/vsftpd.conf"
 GRUPO_SELECCIONADO=""
 
@@ -28,7 +33,7 @@ listen_ipv6=YES
 anonymous_enable=YES
 local_enable=YES
 write_enable=YES
-local_umask=022
+local_umask=002
 dirmessage_enable=YES
 use_localtime=YES
 xferlog_enable=YES
@@ -128,7 +133,6 @@ procesar_usuario() {
             fi
             [ -d "$home_usr/$grupo_actual" ] && rmdir "$home_usr/$grupo_actual"
             
-            # NUEVO: Lo cambiamos de grupo y aseguramos que siga en ftp_auth (-a -G)
             usermod -g "$grupo" -a -G ftp_auth "$usuario"
             
             mkdir -p "$home_usr/$grupo"
@@ -146,17 +150,16 @@ procesar_usuario() {
     else
         echo -e "${CIAN}Desplegando nuevo usuario: $usuario ($grupo)...${RESET}"
         
-        # NUEVO: Lo creamos inyectándolo en su grupo primario Y en ftp_auth (-G)
         useradd -m -s /usr/sbin/nologin -g "$grupo" -G ftp_auth "$usuario"
         echo "$usuario:$password" | chpasswd
 
         chmod a-w "$home_usr"
 
-        mkdir -p "$home_usr/personal"
+        mkdir -p "$home_usr/$usuario"
         mkdir -p "$home_usr/general"
         mkdir -p "$home_usr/$grupo"
 
-        chown "$usuario":"$grupo" "$home_usr/personal"
+        chown "$usuario":"$grupo" "$home_usr/$usuario"
 
         mount --bind "$DIR_FTP_MASTER/general" "$home_usr/general"
         mount --bind "$DIR_FTP_MASTER/$grupo" "$home_usr/$grupo"
