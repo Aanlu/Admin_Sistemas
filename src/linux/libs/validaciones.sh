@@ -90,9 +90,14 @@ capturar_entero() {
     local input_num
     while true; do
         read -p "$mensaje: " input_num
-        if [[ "$input_num" =~ ^[1-9][0-9]{0,2}$ ]]; then
-            echo "$input_num"
-            return 0
+        input_num="${input_num// /}"
+        if [[ "$input_num" =~ ^[1-9][0-9]*$ ]]; then
+            if [ "$input_num" -le 65535 ]; then
+                echo "$input_num"
+                return 0
+            else
+                log_error "Entrada inválida. El valor no puede exceder 65535." >&2
+            fi
         else
             log_error "Entrada inválida. Debe ser un número entero mayor a 0." >&2
         fi

@@ -8,7 +8,6 @@ source "$SCRIPT_DIR/../libs/utils.sh"
 source "$SCRIPT_DIR/../libs/validaciones.sh"
 
 DIR_FTP_MASTER="/var/ftp_master"
-# ... el resto del script continúa igual ...
 CONF_FTP="/etc/vsftpd.conf"
 GRUPO_SELECCIONADO=""
 
@@ -27,6 +26,8 @@ gestionar_instalacion_ftp() {
     
     [ ! -f "${CONF_FTP}.bak" ] && cp "$CONF_FTP" "${CONF_FTP}.bak"
 
+    # Se agregó file_open_mode=0777 para que junto al umask 002, 
+    # garantice permisos rwxrwxr-x y borrado cruzado perfecto.
     cat > "$CONF_FTP" <<EOF
 listen=NO
 listen_ipv6=YES
@@ -34,6 +35,7 @@ anonymous_enable=YES
 local_enable=YES
 write_enable=YES
 local_umask=002
+file_open_mode=0777
 dirmessage_enable=YES
 use_localtime=YES
 xferlog_enable=YES
@@ -102,7 +104,10 @@ seleccionar_o_crear_grupo() {
             
             mkdir -p "$DIR_FTP_MASTER/$nuevo_grupo"
             chown root:"$nuevo_grupo" "$DIR_FTP_MASTER/$nuevo_grupo"
-            chmod 2770 "$DIR_FTP_MASTER/$nuevo_grupo"
+            
+            # SOLUCION: 2775 asegura la travesía en vsftpd. 
+            # El aislamiento lo da el chroot, no el permiso de la bóveda.
+            chmod 2775 "$DIR_FTP_MASTER/$nuevo_grupo"
             
             GRUPO_SELECCIONADO="$nuevo_grupo"
             return 0
@@ -128,10 +133,16 @@ procesar_usuario() {
         if [ "$grupo_actual" != "$grupo" ]; then
             echo -e "${CIAN}Migrando usuario de '$grupo_actual' a '$grupo'...${RESET}"
             
+            # --- SOLUCIÓN DE AUDITORÍA: DESTRUCCIÓN DE CACHÉ Y SESIONES ACTIVAS ---
+            # Matamos cualquier proceso FTP activo exclusivo de este usuario 
+            # para obligar al cliente (FileZilla) a reconectarse y ver la nueva realidad NTFS/Linux.
+            pkill -u "$usuario" vsftpd 2>/dev/null
+            
+            # Desmontaje perezoso (-l) para evitar cuelgues de "Target is Busy"
             if mountpoint -q "$home_usr/$grupo_actual"; then
-                umount "$home_usr/$grupo_actual"
+                umount -l "$home_usr/$grupo_actual" 2>/dev/null
             fi
-            [ -d "$home_usr/$grupo_actual" ] && rmdir "$home_usr/$grupo_actual"
+            [ -d "$home_usr/$grupo_actual" ] && rmdir "$home_usr/$grupo_actual" 2>/dev/null
             
             usermod -g "$grupo" -a -G ftp_auth "$usuario"
             
@@ -150,11 +161,18 @@ procesar_usuario() {
     else
         echo -e "${CIAN}Desplegando nuevo usuario: $usuario ($grupo)...${RESET}"
         
-        useradd -m -s /usr/sbin/nologin -g "$grupo" -G ftp_auth "$usuario"
+        # SOLUCIÓN DE AUDITORÍA VISUAL: 
+        # Se cambió -m por -M y se forzó el directorio con -d. 
+        # Esto EVITA que Linux copie los archivos ocultos basura (.bashrc, .profile, etc)
+        useradd -M -d "$home_usr" -s /usr/sbin/nologin -g "$grupo" -G ftp_auth "$usuario"
         echo "$usuario:$password" | chpasswd
 
+        # Construcción manual y estéril de la jaula (chroot)
+        mkdir -p "$home_usr"
+        chown "$usuario":"$grupo" "$home_usr"
         chmod a-w "$home_usr"
 
+        # Creación de los túneles y la carpeta privada con el nombre del usuario
         mkdir -p "$home_usr/$usuario"
         mkdir -p "$home_usr/general"
         mkdir -p "$home_usr/$grupo"
@@ -223,7 +241,7 @@ eliminar_usuarios_ftp() {
         if confirmar_accion "¡PELIGRO! ¿Destruir TODOS los usuarios FTP y su información personal?"; then
             for usr in "${arr_users[@]}"; do
                 for mnt in $(mount | grep "/home/$usr/" | awk '{print $3}'); do
-                    umount "$mnt" 2>/dev/null
+                    umount -l "$mnt" 2>/dev/null
                 done
                 sed -i "\|/home/$usr/|d" /etc/fstab
                 userdel -r "$usr" 2>/dev/null
@@ -238,7 +256,7 @@ eliminar_usuarios_ftp() {
             local usr_borrar="${arr_users[$usr_eleccion]}"
             if confirmar_accion "¿Eliminar al usuario '$usr_borrar' del sistema operativo?"; then
                 for mnt in $(mount | grep "/home/$usr_borrar/" | awk '{print $3}'); do
-                    umount "$mnt" 2>/dev/null
+                    umount -l "$mnt" 2>/dev/null
                 done
                 sed -i "\|/home/$usr_borrar/|d" /etc/fstab
                 systemctl daemon-reload >/dev/null 2>&1
@@ -277,7 +295,7 @@ eliminar_grupo_ftp() {
         if confirmar_accion "¡ATENCIÓN! ¿Eliminar '$grupo_borrar' y borrar sus archivos compartidos?"; then
             
             for mnt in $(mount | grep "$DIR_FTP_MASTER/$grupo_borrar" | awk '{print $3}'); do
-                umount "$mnt" 2>/dev/null
+                umount -l "$mnt" 2>/dev/null
             done
             
             sed -i "\|/var/ftp_master/$grupo_borrar|d" /etc/fstab
@@ -302,7 +320,7 @@ resetear_entorno_ftp() {
         local arr_users=($(awk -F: '$7 == "/usr/sbin/nologin" && $6 ~ "^/home/" {print $1}' /etc/passwd))
         for usr in "${arr_users[@]}"; do
             for mnt in $(mount | grep "/home/$usr/" | awk '{print $3}'); do
-                umount "$mnt" 2>/dev/null
+                umount -l "$mnt" 2>/dev/null
             done
             sed -i "\|/home/$usr/|d" /etc/fstab
             userdel -r "$usr" 2>/dev/null
@@ -310,7 +328,7 @@ resetear_entorno_ftp() {
 
         echo -e "${CIAN}Desmontando túneles huérfanos y limpiando fstab...${RESET}"
         for mnt in $(mount | grep "ftp_master" | awk '{print $3}'); do
-            umount "$mnt" 2>/dev/null
+            umount -l "$mnt" 2>/dev/null
         done
         sed -i '/ftp_master/d' /etc/fstab
         systemctl daemon-reload >/dev/null 2>&1
