@@ -14,7 +14,7 @@ function Validar-Rango {
     $red2 = $ip2.Substring(0, $ip2.LastIndexOf('.'))
 
     if ($red1 -ne $red2) { return $false }
-    
+
     $host1 = [int]($ip1.Split('.')[3])
     $host2 = [int]($ip2.Split('.')[3])
 
@@ -49,7 +49,7 @@ function Obtener-ID-Red {
     $ipBytes = ([System.Net.IPAddress]::Parse($ip)).GetAddressBytes()
     $maskBytes = ([System.Net.IPAddress]::Parse($mask)).GetAddressBytes()
     $netBytes = [byte[]]::new(4)
-    for($i=0; $i -lt 4; $i++) { $netBytes[$i] = $ipBytes[$i] -band $maskBytes[$i] }
+    for ($i = 0; $i -lt 4; $i++) { $netBytes[$i] = $ipBytes[$i] -band $maskBytes[$i] }
     return ([System.Net.IPAddress]::new($netBytes)).IPAddressToString
 }
 
@@ -57,11 +57,15 @@ function Capturar-Entero {
     param([string]$Mensaje)
     while ($true) {
         $input_num = Read-Host "$Mensaje"
-        if ($input_num -match "^[1-9][0-9]{0,2}$") {
-            return [int]$input_num
-        } else {
-            Log-Error "Entrada inválida. Debe ser un número entero mayor a 0."
+        # CORREGIDO: regex anterior "^[1-9][0-9]{0,2}$" solo aceptaba 1-999
+        # bloqueando puertos válidos como 8080, 3000, 65000 en un loop infinito
+        if ($input_num -match "^\d+$") {
+            $num = [int]$input_num
+            if ($num -ge 1 -and $num -le 65535) {
+                return $num
+            }
         }
+        Log-Error "Entrada inválida. Debe ser un número entero entre 1 y 65535."
     }
 }
 

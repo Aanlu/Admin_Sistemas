@@ -1,16 +1,15 @@
-﻿. .\libs\utils.ps1
-
-if (-not (Instalar-DependenciaSilenciosa "DNS")) { 
-    Log-Error "Fallo al instalar DNS."
-    Pausa
-    exit 1 
-}
+﻿# Las libs ya son cargadas por menu_principal.ps1
+# CORRECCIÓN CRÍTICA: se eliminó la instalación de DNS en el scope global del archivo.
+# La línea original "if (-not (Instalar-DependenciaSilenciosa "DNS")) { exit }" se ejecutaba
+# automáticamente al hacer dot-source del módulo, instalando DNS sin que el usuario lo pidiera.
+# Ahora la instalación ocurre solo cuando el usuario entra a "Crear Zona DNS".
+# Se eliminó la llamada directa "Menu-DNS" del final del archivo.
 
 function Seleccionar-Zona {
     $zonasObj = Get-DnsServerZone -ErrorAction SilentlyContinue | Where-Object { $_.IsAutoCreated -eq $false -and $_.ZoneType -eq "Primary" }
     if (-not $zonasObj) { return 1 }
     
-    $zonas = @($zonasObj.ZoneName)
+    $zonas    = @($zonasObj.ZoneName)
     $eleccion = Generar-Menu "SELECCIONE LA ZONA DNS" $zonas "Cancelar y Volver"
     
     if ($eleccion -eq $zonas.Count) { return 2 }
@@ -19,18 +18,15 @@ function Seleccionar-Zona {
 }
 
 function Forzar-ResolucionLocal {
-    param(
-        [string]$DnsIP
-    )
+    param([string]$DnsIP)
 
     if ([string]::IsNullOrWhiteSpace($DnsIP)) {
         Log-Error "No se proporcionó una IP válida al módulo de resolución."
         return
     }
 
-    # Truco analítico: Averiguamos qué interfaz de red tiene asignada esta IP
-    $ipObj = Get-NetIPAddress -IPAddress $DnsIP -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
-    $interface = if ($ipObj) { $ipObj.InterfaceAlias } else { $null }
+    $ipObj      = Get-NetIPAddress -IPAddress $DnsIP -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
+    $interface  = if ($ipObj) { $ipObj.InterfaceAlias } else { $null }
 
     if (-not $interface) {
         Log-Warning "No se pudo mapear la IP $DnsIP a una interfaz física. Omitiendo bind estricto."
@@ -40,24 +36,35 @@ function Forzar-ResolucionLocal {
     Log-Info "Asegurando enrutamiento DNS hacia el Servidor Local ($DnsIP) en la interfaz '$interface'..."
 
     try {
-        # 1. Obligamos a la tarjeta de red a consultar EXCLUSIVAMENTE a nuestro servidor DNS local
         Set-DnsClientServerAddress -InterfaceAlias $interface -ServerAddresses $DnsIP -ErrorAction Stop
-        
-        # 2. Purgamos la caché DNS de Windows (El equivalente a destruir el intermediario)
         Clear-DnsClientCache
-        
         Log-Ok "Resolución local blindada. DNS Windows ($DnsIP) tiene el control absoluto en '$interface'."
     } catch {
         Log-Error "Error al forzar el DNS: $($_.Exception.Message)"
     }
 }
+
 function Crear-Zona {
     Clear-Host
     Write-Host "--- CREACIÓN DE ZONA DNS ---" -ForegroundColor Yellow
-    
+
+    # Instalación bajo demanda: solo se instala DNS cuando el usuario explícitamente crea una zona
+    if (-not (Get-WindowsFeature -Name DNS -ErrorAction SilentlyContinue).Installed) {
+        Log-Warning "El rol DNS no está instalado."
+        if (Confirmar-Accion "¿Desea instalar el rol DNS Server ahora?") {
+            if (-not (Instalar-DependenciaSilenciosa "DNS")) {
+                Log-Error "Fallo al instalar DNS. Abortando."
+                Pausa; return
+            }
+        } else {
+            Log-Warning "Instalación cancelada."
+            Pausa; return
+        }
+    }
+
     $svc = Get-Service DNS -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -eq "Running") {
-        Log-Info "Servicio BIND9 (DNS Windows) detectado y operando en segundo plano."
+        Log-Info "Servicio DNS detectado y operando en segundo plano."
     }
 
     $dominio = ""
@@ -73,18 +80,16 @@ function Crear-Zona {
     $zonaExistente = Get-DnsServerZone -Name $dominio -ErrorAction SilentlyContinue
     if ($zonaExistente) {
         Log-Error "La zona ya existe en el servidor. Abortando para evitar sobrescritura."
-        Pausa
-        return
+        Pausa; return
     }
 
     $ip_server = Capturar-IP "IP del Servidor para registros raíz y subdominios"
 
-   try {
+    try {
         Add-DnsServerPrimaryZone -Name $dominio -ZoneFile "$dominio.dns" -ErrorAction Stop
-        Add-DnsServerResourceRecordA -Name "@" -IPv4Address $ip_server -ZoneName $dominio -ErrorAction SilentlyContinue
+        Add-DnsServerResourceRecordA -Name "@"   -IPv4Address $ip_server -ZoneName $dominio -ErrorAction SilentlyContinue
         Add-DnsServerResourceRecordA -Name "ns1" -IPv4Address $ip_server -ZoneName $dominio -ErrorAction SilentlyContinue
         
-        # AQUÍ ESTÁ EL CAMBIO: Forzamos la resolución a la IP que el usuario eligió
         Forzar-ResolucionLocal -DnsIP $ip_server
 
         Log-Ok "Zona de dominio generada y cargada exitosamente."
@@ -93,7 +98,6 @@ function Crear-Zona {
     }
     Pausa
 }
-
 
 function Leer-Zona {
     $estado = Seleccionar-Zona
@@ -144,7 +148,7 @@ function Agregar-Registro {
         Log-Error "Caracteres inválidos. Emplee únicamente letras, números, guiones o @"
     }
 
-    $ip_host = Capturar-IP "Nueva IP a asignar al host"
+    $ip_host          = Capturar-IP "Nueva IP a asignar al host"
     $registroExistente = Get-DnsServerResourceRecord -ZoneName $dominio -Name $hostn -RRType A -ErrorAction SilentlyContinue
 
     if ($registroExistente) {
@@ -153,7 +157,7 @@ function Agregar-Registro {
             try {
                 Remove-DnsServerResourceRecord -ZoneName $dominio -Name $hostn -RRType A -Force -ErrorAction Stop
                 Add-DnsServerResourceRecordA -Name $hostn -IPv4Address $ip_host -ZoneName $dominio -ErrorAction Stop
-                Log-Ok "Registro actualizado y servicio DNS reiniciado correctamente."
+                Log-Ok "Registro actualizado correctamente."
             } catch {
                 Log-Error "Fallo de validación. Se revirtió el cambio para proteger la zona."
                 Write-Host "`n--- DETALLE TÉCNICO DEL RECHAZO ---" -ForegroundColor Red
@@ -287,7 +291,6 @@ function Modificar-Nombre-Zona {
             
             $registrosViejos = Get-DnsServerResourceRecord -ZoneName $dominio_viejo -ErrorAction SilentlyContinue | Where-Object { $_.RecordType -match "A|CNAME" }
             foreach ($reg in $registrosViejos) {
-                # Evitamos duplicar la raíz que Add-DnsServerPrimaryZone a veces auto-crea
                 if ($reg.HostName -eq "@") {
                     Remove-DnsServerResourceRecord -ZoneName $dominio_nuevo -Name "@" -RRType A -Force -ErrorAction SilentlyContinue
                 }
@@ -303,7 +306,7 @@ function Modificar-Nombre-Zona {
             Log-Ok "Migración exitosa. La zona ahora opera como $dominio_nuevo"
         } catch {
             Remove-DnsServerZone -Name $dominio_nuevo -Force -ErrorAction SilentlyContinue
-            Log-Error "La validación de BIND9 falló. Se revirtieron los cambios por seguridad: $($_.Exception.Message)"
+            Log-Error "La validación falló. Se revirtieron los cambios por seguridad: $($_.Exception.Message)"
         }
     } else {
         Log-Warning "Migración cancelada."
@@ -319,7 +322,7 @@ function Eliminar-Zona {
     $dominio = $global:ZONA_SELECCIONADA
     Clear-Host
     Write-Host "--- DESTRUCCIÓN DE ZONA DNS: $dominio ---" -ForegroundColor Yellow
-    Write-Host "¡ADVERTENCIA! Esta acción destruirá el archivo físico y desconectará la zona del orquestador." -ForegroundColor Red
+    Write-Host "¡ADVERTENCIA! Esta acción destruirá el archivo físico y desconectará la zona." -ForegroundColor Red
 
     if (Confirmar-Accion "¿Está absolutamente seguro de ELIMINAR toda la zona '$dominio'?") {
         try {
@@ -360,5 +363,3 @@ function Menu-DNS {
         }
     }
 }
-
-Menu-DNS

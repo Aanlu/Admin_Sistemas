@@ -1,6 +1,6 @@
-﻿. .\libs\utils.ps1
-. .\libs\validaciones.ps1
-. .\libs\seguridad.ps1
+﻿# Las libs ya son cargadas por menu_principal.ps1
+# Se eliminaron los dot-source de libs aquí para evitar doble carga
+# Se eliminó la llamada directa "Menu-DHCP" del final del archivo
 
 function Gestionar-Instalacion {
     Clear-Host
@@ -29,12 +29,12 @@ function Gestionar-Instalacion {
     Pausa
 }
 
-function Seleccionar-Interfaz {
+function Seleccionar-Interfaz-DHCP {
     $interfaces = Get-NetAdapter | Where-Object { $_.Virtual -eq $false -and $_.InterfaceDescription -notlike "*Loopback*" }
     if ($interfaces.Count -eq 0) { Log-Error "No hay interfaces fisicas activas."; return $null }
     
     Write-Host "`n--- SELECCIÓN DE INTERFAZ ---" -ForegroundColor Cyan
-    for ($i=0; $i -lt $interfaces.Count; $i++) {
+    for ($i = 0; $i -lt $interfaces.Count; $i++) {
         Write-Host "[$i] $($interfaces[$i].Name) | Desc: $($interfaces[$i].InterfaceDescription)"
     }
     
@@ -52,7 +52,7 @@ function Configurar-DHCP {
         Pausa; return
     }
 
-    $adapter = Seleccionar-Interfaz
+    $adapter = Seleccionar-Interfaz-DHCP
     if (-not $adapter) { Pausa; return }
     $ALIAS = $adapter.Name
 
@@ -68,16 +68,16 @@ function Configurar-DHCP {
         Log-Error "IP final inválida o fuera de rango."
     }
 
-    $MASCARA = Obtener-Mascara $IP_INICIAL
-    $SUBNET_ID = Obtener-ID-Red $IP_INICIAL $MASCARA
+    $MASCARA      = Obtener-Mascara $IP_INICIAL
+    $SUBNET_ID    = Obtener-ID-Red $IP_INICIAL $MASCARA
     
     $CIDR = 24
-    if ($MASCARA -eq "255.0.0.0") { $CIDR = 8 }
+    if ($MASCARA -eq "255.0.0.0")     { $CIDR = 8 }
     elseif ($MASCARA -eq "255.255.0.0") { $CIDR = 16 }
 
     $IP_RANGO_INICIO = Incrementar-IP $IP_INICIAL
 
-    $GW = Capturar-IP-Opcional "Gateway"
+    $GW  = Capturar-IP-Opcional "Gateway"
     $DNS = Capturar-IP "Servidor DNS principal"
 
     while ($true) {
@@ -90,7 +90,7 @@ function Configurar-DHCP {
     }
 
     $ipActualObj = Get-NetIPAddress -InterfaceAlias $ALIAS -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
-    $IP_ACTUAL = if ($ipActualObj) { $ipActualObj.IPAddress } else { "" }
+    $IP_ACTUAL   = if ($ipActualObj) { $ipActualObj.IPAddress } else { "" }
 
     try {
         if ($IP_INICIAL -ne $IP_ACTUAL) {
@@ -144,7 +144,7 @@ function Configurar-DHCP {
         Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 6 -Value @($DNS) -Force -ErrorAction Stop
         Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 15 -Value $SCOPE_NAME -Force -ErrorAction Stop
         
-        Abrir-Puertos-Servicio -NombreServicio "DHCP" -Puertos 67,68 -Protocolo UDP
+        Abrir-Puertos-Servicio -NombreServicio "DHCP" -Puertos 67, 68 -Protocolo UDP
         Permitir-Ping-Global
         Restart-Service DHCPServer -Force
         Start-Sleep -Seconds 2
@@ -158,7 +158,7 @@ function Configurar-DHCP {
     Pausa
 }
 
-function Alternar-Servicio {
+function Alternar-Servicio-DHCP {
     Clear-Host
     Write-Host "--- CONTROL DE SERVICIO DHCP ---" -ForegroundColor Yellow
     if (-not (Get-WindowsFeature -Name DHCP).Installed) {
@@ -202,19 +202,19 @@ function Monitorear-Clientes {
         Write-Host "`n[ ESTADO DEL SERVICIO ]" -ForegroundColor Cyan
         $svc = Get-Service DHCPServer -ErrorAction SilentlyContinue
         if ($svc.Status -eq "Running") {
-             Write-Host "Estado: " -NoNewline; Write-Host "ACTIVO" -ForegroundColor Green
+            Write-Host "Estado: " -NoNewline; Write-Host "ACTIVO" -ForegroundColor Green
              
-             Write-Host "`n[ CLIENTES CONECTADOS ]" -ForegroundColor Yellow
-             Write-Host ("{0,-18} {1,-20} {2,-20}" -f "IP Address", "MAC Address", "Hostname")
-             Write-Host "------------------------------------------------------------"
+            Write-Host "`n[ CLIENTES CONECTADOS ]" -ForegroundColor Yellow
+            Write-Host ("{0,-18} {1,-20} {2,-20}" -f "IP Address", "MAC Address", "Hostname")
+            Write-Host "------------------------------------------------------------"
              
-             $leases = Get-DhcpServerv4Lease -ScopeId $scope.ScopeId -ErrorAction SilentlyContinue
-             if ($leases) {
-                 foreach ($l in $leases) { Write-Host ("{0,-18} {1,-20} {2,-20}" -f $l.IPAddress, $l.ClientId, $l.HostName) }
-             }
+            $leases = Get-DhcpServerv4Lease -ScopeId $scope.ScopeId -ErrorAction SilentlyContinue
+            if ($leases) {
+                foreach ($l in $leases) { Write-Host ("{0,-18} {1,-20} {2,-20}" -f $l.IPAddress, $l.ClientId, $l.HostName) }
+            }
         } else {
-             Write-Host "Estado: " -NoNewline; Write-Host "INACTIVO" -ForegroundColor Red
-             Log-Warning "El servicio está detenido. No se muestran clientes."
+            Write-Host "Estado: " -NoNewline; Write-Host "INACTIVO" -ForegroundColor Red
+            Log-Warning "El servicio está detenido. No se muestran clientes."
         }
 
         if ([System.Console]::KeyAvailable) {
@@ -239,11 +239,9 @@ function Menu-DHCP {
         switch ($Eleccion) {
             0 { Gestionar-Instalacion }
             1 { Configurar-DHCP }
-            2 { Alternar-Servicio }
+            2 { Alternar-Servicio-DHCP }
             3 { Monitorear-Clientes }
             4 { return }
         }
     }
 }
-
-Menu-DHCP
