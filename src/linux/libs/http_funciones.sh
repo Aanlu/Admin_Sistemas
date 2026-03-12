@@ -84,9 +84,13 @@ instalador_paquetes() {
         apt-get install -yq default-jdk >> "$LOG_FILE" 2>&1
         id -u tomcat >/dev/null 2>&1 || useradd -m -U -d /opt/tomcat -s /bin/false tomcat
         rm -rf /opt/tomcat/*
-        wget -q "https://archive.apache.org/dist/tomcat/tomcat-10/v${version}/bin/apache-tomcat-${version}.tar.gz" -O /tmp/tomcat.tar.gz >> "$LOG_FILE" 2>&1
-        if [ ! -f /tmp/tomcat.tar.gz ]; then
-            rm -f /usr/sbin/policy-rc.d
+        # BISTURI: curl -f falla silenciosamente ante un 404, evitando crear archivos basura HTML
+        curl -f -s "https://archive.apache.org/dist/tomcat/tomcat-10/v${version}/bin/apache-tomcat-${version}.tar.gz" -o /tmp/tomcat.tar.gz >> "$LOG_FILE" 2>&1
+        
+        # BISTURI: Validación de doble factor (Existencia + Firma binaria)
+        if [ ! -f /tmp/tomcat.tar.gz ] || ! file /tmp/tomcat.tar.gz | grep -q "gzip compressed"; then
+            echo -e "\n${ROJO}[ERROR] La versión $version de Tomcat no se pudo descargar (Posible 404 en el mirror).${RESET}"
+            rm -f /tmp/tomcat.tar.gz /usr/sbin/policy-rc.d
             trap - INT
             return 1
         fi

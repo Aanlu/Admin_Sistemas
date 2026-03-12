@@ -82,7 +82,8 @@ function Gestionar-InstalacionFTP {
     & $appcmd set site $global:SITE_NAME "/ftpServer.security.authentication.anonymousAuthentication.enabled:true"
     & $appcmd set site $global:SITE_NAME "/ftpServer.userIsolation.mode:IsolateRootDirectoryOnly"
     & $appcmd set config $global:SITE_NAME "/section:system.ftpServer/security/authorization" "/+`"[accessType='Allow',users='*',permissions='Read,Write']`"" /commit:apphost
-    & $appcmd set config $global:SITE_NAME "/section:system.ftpServer/security/authorization" "/+`"[accessType='Allow',users='?',permissions='Read,Write']`"" /commit:apphost
+    # CUESTIONAMIENTO: Los usuarios anónimos ('?') jamás deben tener Write en un entorno compartido.
+    & $appcmd set config $global:SITE_NAME "/section:system.ftpServer/security/authorization" "/+`"[accessType='Allow',users='?',permissions='Read']`"" /commit:apphost
 
     Restart-Service ftpsvc -ErrorAction SilentlyContinue
     Stop-Transcript

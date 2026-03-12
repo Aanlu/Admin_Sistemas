@@ -1038,7 +1038,31 @@ function Instalar-PaquetesWeb {
         Write-Host "  [*] Registrando Apache como servicio de Windows..." -ForegroundColor Cyan
         & $exeRuta -k install 2>&1 | Out-Null
         Start-Sleep -Milliseconds 500
-        Start-Service "Apache2.4" -ErrorAction SilentlyContinue
+        
+        # 1. IDENTIDAD DEL SERVICIO: Cambiar de LocalSystem a NetworkService (Mínimo Privilegio)
+        Write-Host "  [*] Configurando 'NetworkService' como usuario dedicado del motor..." -ForegroundColor Cyan
+        $svcName = "Apache2.4"
+        & sc.exe config $svcName obj= "NT AUTHORITY\NetworkService" password= "" | Out-Null
+        
+        # 2. PERMISOS NTFS DE SISTEMA: NetworkService necesita poder leer los binarios y escribir logs
+        $d = Obtener-RutaApache
+        if ($d) {
+            $Acl = Get-Acl $d
+            $NetSvcAccount = New-Object System.Security.Principal.NTAccount("NT AUTHORITY\NetworkService")
+            
+            # Permiso base: Leer y Ejecutar en toda la carpeta de Apache
+            $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($NetSvcAccount, "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+            Set-Acl -Path $d -AclObject $Acl
+            
+            # Permiso elevado: Modificar SOLO en la carpeta de logs
+            $logDir = Join-Path $d "logs"
+            if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+            $AclLogs = Get-Acl $logDir
+            $AclLogs.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($NetSvcAccount, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
+            Set-Acl -Path $logDir -AclObject $AclLogs
+        }
+
+        Start-Service $svcName -ErrorAction SilentlyContinue
     }
 
     Escribir-Log "INFO" "$paquete v$Version instalado correctamente."
@@ -1335,6 +1359,13 @@ function Aislar-DirectorioWeb {
                         [System.Security.Principal.SecurityIdentifier]::new($sid),
                         "ReadAndExecute", $inh, $none, $allow))
             }
+        } elseif ($Motor -eq "apache") {
+            # Inyección crítica: S-1-5-20 es el SID universal de 'NetworkService'.
+            # Sin esto, el Apache des-privilegiado arrojará 403 Forbidden.
+            $acl.AddAccessRule(
+                [System.Security.AccessControl.FileSystemAccessRule]::new(
+                    [System.Security.Principal.SecurityIdentifier]::new('S-1-5-20'),
+                    "ReadAndExecute", $inh, $none, $allow))
         }
         Set-Acl -Path $ruta -AclObject $acl
         Escribir-Log "INFO" "Permisos NTFS aplicados en $ruta para $Motor"

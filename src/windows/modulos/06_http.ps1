@@ -24,9 +24,43 @@ function Desplegar-ServidorHTTP {
         Pausa; return
     }
 
-    $selVer = Generar-Menu "SELECCIONE LA VERSION DE $($motor.ToUpper())" $versiones "Cancelar"
-    if ($selVer -eq $versiones.Count) { return }
-    $version = ($versiones[$selVer] -split " ")[0]
+# ── FASE 1.5: Analisis de Estado (Upgrade/Downgrade) ──────────────────────
+    $infoActual = Obtener-InfoServidor -Motor $motor
+    $saltarInstalacion = $false
+
+    if ($motor -eq "iis") {
+        if ($infoActual -and $infoActual.Estado -ne "No instalado") {
+            Write-Host "`n  [INFO] IIS ya esta instalado (Su version es nativa del Kernel de Windows)." -ForegroundColor Yellow
+            if (-not (Confirmar-Accion "Desea omitir la instalacion y solo reconfigurar puertos/plantillas?")) { return }
+            $saltarInstalacion = $true
+        }
+    } else {
+        # Extraemos la version actual solo si son numeros puros (ej. 2.4.55)
+        $vActStr = if ($infoActual -and $infoActual.Version -match '^[\d\.]+$') { $infoActual.Version } else { $null }
+        
+        if ($vActStr) {
+            try {
+                $vSel = [version]$version
+                $vAct = [version]$vActStr
+
+                if ($vAct -eq $vSel) {
+                    Write-Host "`n  [INFO] La version $version ya se encuentra instalada." -ForegroundColor Yellow
+                    if (-not (Confirmar-Accion "Desea forzar una reinstalacion destructiva?")) {
+                        $saltarInstalacion = $true
+                    }
+                } elseif ($vAct -lt $vSel) {
+                    Write-Host "`n  [ACTUALIZACION] Tiene la version $vAct. Se actualizara a la $vSel." -ForegroundColor Cyan
+                    if (-not (Confirmar-Accion "Desea proceder con la actualizacion (Upgrade)?")) { return }
+                } else {
+                    Write-Host "`n  [PELIGRO] Tiene instalada una version SUPERIOR ($vAct)." -ForegroundColor Red
+                    Write-Host "  Forzar la version inferior ($vSel) ejecutara una purga total del servidor." -ForegroundColor Yellow
+                    if (-not (Confirmar-Accion "Desea forzar la degradacion (Downgrade)?")) { return }
+                }
+            } catch {
+                # Si falla el parseo matematico, ignoramos y seguimos flujo normal
+            }
+        }
+    }
 
     # ── FASE 2: Puerto ────────────────────────────────────────────────────────
     # Detectar si ya hay una instalacion previa del mismo motor corriendo.
@@ -84,11 +118,15 @@ function Desplegar-ServidorHTTP {
     # ── FASE 4: Instalacion ───────────────────────────────────────────────────
     Write-Host "`n--- FASE 4: APROVISIONAMIENTO ---" -ForegroundColor Yellow
 
-    if (-not (Instalar-PaquetesWeb -Motor $motor -Version $version -Puerto $puerto)) {
-        Log-Error "Fallo critico en la instalacion. Ver log en: $($global:LOG_FILE)"
-        Pausa; return
+    if ($saltarInstalacion) {
+        Write-Host "  [*] Instalacion de binarios omitida por solicitud del usuario." -ForegroundColor DarkGray
+    } else {
+        if (-not (Instalar-PaquetesWeb -Motor $motor -Version $version -Puerto $puerto)) {
+            Log-Error "Fallo critico en la instalacion. Ver log en: $($global:LOG_FILE)"
+            Pausa; return
+        }
+        Log-Ok "Binarios de $motor $version instalados correctamente."
     }
-    Log-Ok "Binarios de $motor $version instalados correctamente."
 
     # ── FASE 5: Inyeccion de puerto ───────────────────────────────────────────
     Write-Host "`n--- FASE 5: INYECCION DE PUERTO ---" -ForegroundColor Yellow
