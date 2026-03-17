@@ -170,3 +170,49 @@ seleccionar_interfaz_dinamica() {
     INTERFAZ_SELECCIONADA="${arr_ifaces[$eleccion]}"
     return 0
 }
+
+ARCHIVO_ESTADO="/etc/admin_sistemas/estado.conf"
+
+inicializar_estado() {
+    local dir_estado=$(dirname "$ARCHIVO_ESTADO")
+    if [ ! -d "$dir_estado" ]; then
+        mkdir -p "$dir_estado"
+        chmod 700 "$dir_estado" # Solo root puede ver esta carpeta
+    fi
+    if [ ! -f "$ARCHIVO_ESTADO" ]; then
+        touch "$ARCHIVO_ESTADO"
+        chmod 600 "$ARCHIVO_ESTADO"
+        # Variables por defecto al nacer el sistema
+        echo "DOMINIO_SSL=reprobados.com" > "$ARCHIVO_ESTADO"
+        echo "MODO_OFFLINE=false" >> "$ARCHIVO_ESTADO"
+    fi
+}
+
+# Uso: guardar_estado "CLAVE" "Valor nuevo"
+guardar_estado() {
+    local clave="$1"
+    local valor="$2"
+    
+    inicializar_estado
+    
+    # Idempotencia: Si la clave ya existe, la actualiza. Si no, la agrega.
+    if grep -q "^${clave}=" "$ARCHIVO_ESTADO"; then
+        # Usamos pipes (|) en el sed por si el valor contiene barras (ej. rutas de carpetas)
+        sed -i "s|^${clave}=.*|${clave}=${valor}|" "$ARCHIVO_ESTADO"
+    else
+        echo "${clave}=${valor}" >> "$ARCHIVO_ESTADO"
+    fi
+}
+
+# Uso: variable=$(leer_estado "CLAVE")
+leer_estado() {
+    local clave="$1"
+    inicializar_estado
+    
+    # Extrae solo lo que está después del signo igual
+    grep "^${clave}=" "$ARCHIVO_ESTADO" | cut -d'=' -f2-
+}
+
+# Exportamos el dominio globalmente cada vez que utils.sh es invocado por un módulo
+inicializar_estado
+export DOMINIO_SSL=$(leer_estado "DOMINIO_SSL")

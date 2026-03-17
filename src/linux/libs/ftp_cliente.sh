@@ -20,12 +20,17 @@ ftp_conectar() {
 
     FTP_IP=$(capturar_ip "IP del servidor FTP")
 
-    read -p "Usuario FTP: " FTP_USER
-    [ -z "$FTP_USER" ] && { log_error "Usuario vacío."; return 1; }
+    read -p "Usuario FTP [Enter para Anónimo]: " FTP_USER
+    [ -z "$FTP_USER" ] && FTP_USER="anonymous"
 
-    read -s -p "Contraseña FTP: " FTP_PASS
-    echo ""
-    [ -z "$FTP_PASS" ] && { log_error "Contraseña vacía."; return 1; }
+    if [ "$FTP_USER" == "anonymous" ]; then
+        FTP_PASS="anon@localhost.local"
+        log_info "Autenticando en modo Anónimo..."
+    else
+        read -s -p "Contraseña FTP: " FTP_PASS
+        echo ""
+        [ -z "$FTP_PASS" ] && { log_error "Contraseña vacía no permitida para usuarios locales."; return 1; }
+    fi
 
     echo -e "${CIAN}[*] Verificando conexión a ftp://$FTP_IP ...${RESET}"
     if curl -s --connect-timeout 8 \
@@ -36,7 +41,7 @@ ftp_conectar() {
         return 0
     else
         log_error "No se pudo conectar al servidor FTP en $FTP_IP."
-        log_error "Verifique que el servicio vsftpd esté activo (Módulo FTP)."
+        log_error "Credenciales incorrectas o servicio inalcanzable."
         FTP_IP=""; FTP_USER=""; FTP_PASS=""
         return 1
     fi

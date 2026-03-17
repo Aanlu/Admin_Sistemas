@@ -12,6 +12,96 @@ source "$SCRIPT_DIR/../libs/http_funciones.sh"
 source "$SCRIPT_DIR/../libs/ftp_cliente.sh"
 source "$SCRIPT_DIR/../libs/ssl_funciones.sh"
 
+_auto_descargar_binarios() {
+    local base=$1
+    export DEBIAN_FRONTEND=noninteractive
+    local tmp_dir="/tmp/auto_repo"
+    mkdir -p "$tmp_dir" && cd "$tmp_dir" || return
+
+    # 1. Descarga de Apache y Nginx
+    for motor in apache2 nginx; do
+        local carpeta="Apache"
+        [ "$motor" == "nginx" ] && carpeta="Nginx"
+
+        # Descargamos el binario base actual
+        apt-get download "$motor" >/dev/null 2>&1
+        for f in ${motor}*.deb; do
+            [ -f "$f" ] || continue
+            mv "$f" "$base/$carpeta/"
+            sha256sum "$base/$carpeta/$f" | awk '{print $1}' > "$base/$carpeta/$f.sha256"
+        done
+    done
+
+    # 2. Descarga de Tomcat (Resolviendo el caso especial)
+    local tomcat_ver=$(curl -s https://archive.apache.org/dist/tomcat/tomcat-10/ | grep -oP 'v10\.[0-9]+\.[0-9]+' | sort -uV | tail -1 | sed 's/v//')
+    if [ -n "$tomcat_ver" ]; then
+        local t_url="https://archive.apache.org/dist/tomcat/tomcat-10/v${tomcat_ver}/bin/apache-tomcat-${tomcat_ver}.tar.gz"
+        local t_dest="$base/Tomcat/apache-tomcat-${tomcat_ver}.tar.gz"
+        if [ ! -f "$t_dest" ]; then
+            if curl -f -s "$t_url" -o "$t_dest"; then
+                sha256sum "$t_dest" | awk '{print $1}' > "${t_dest}.sha256"
+            else
+                rm -f "$t_dest"
+            fi
+        fi
+    fi
+
+    # 3. Limpieza y asignación de permisos seguros
+    cd /
+    rm -rf "$tmp_dir"
+    
+    # Si el Módulo 05 ya se corrió, el grupo ftp_auth existe. Si no, usamos root temporalmente.
+    if getent group ftp_auth >/dev/null 2>&1; then
+        chown -R root:ftp_auth "$base" 2>/dev/null
+    fi
+    find "$base" -type d -exec chmod 2775 {} \; 2>/dev/null
+    find "$base" -type f -exec chmod 664 {} \; 2>/dev/null
+}
+
+auditoria_pre_vuelo() {
+    clear
+    echo -e "${AZUL}[*] Iniciando Secuencia de Auditoría Pre-Vuelo...${RESET}"
+
+    # Check 1: ¿Existe configuración DNS local?
+    if [ -z "$(ls -A /var/cache/bind/db.* 2>/dev/null)" ]; then
+        log_warning "No se detectaron zonas DNS locales. La resolución SSL dependerá del archivo 'hosts' o DNS externo."
+    fi
+
+    # Check 2: Estructura de Bóveda FTP
+    local repo_base="/var/ftp_master/http/Linux"
+    local falta_binario=0
+
+    for motor in Apache Nginx Tomcat; do
+        if [ ! -d "$repo_base/$motor" ]; then
+            mkdir -p "$repo_base/$motor"
+        fi
+        # Validamos si las carpetas están vacías
+        if [ "$motor" == "Tomcat" ]; then
+            [ -z "$(ls -A "$repo_base/$motor"/*.tar.gz 2>/dev/null)" ] && falta_binario=1
+        else
+            [ -z "$(ls -A "$repo_base/$motor"/*.deb 2>/dev/null)" ] && falta_binario=1
+        fi
+    done
+
+    # Check 3: Decisión de Orquestación e Internet
+    if [ $falta_binario -eq 1 ]; then
+        if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+            echo -e "${CIAN}[*] Repositorio FTP vacío o incompleto. Auto-descargando binarios seguros en background...${RESET}"
+            guardar_estado "MODO_OFFLINE" "false"
+            _auto_descargar_binarios "$repo_base"
+            log_ok "Auto-descarga completada. Bóveda sincronizada."
+        else
+            log_error "Repositorio incompleto y NO hay conexión a Internet."
+            log_warning "Se activará el MODO OFFLINE ESTRICTO."
+            guardar_estado "MODO_OFFLINE" "true"
+        fi
+    else
+        guardar_estado "MODO_OFFLINE" "false"
+        log_ok "Repositorio FTP íntegro y validado."
+    fi
+    sleep 2
+}
+
 # Dominio para los certificados SSL (configurable al inicio)
 DOMINIO_SSL="${DOMINIO_SSL:-reprobados.com}"
 
@@ -34,14 +124,99 @@ configurar_dominio() {
         nuevo="${nuevo#www.}"
         if [[ "$nuevo" =~ ^[a-z0-9-]+\.[a-z]{2,}(\.[a-z]{2,})?$ ]]; then
             DOMINIO_SSL="$nuevo"
-            # Exportar para que ssl_funciones.sh use el nuevo valor
+            # Inyectamos la persistencia aquí
+            guardar_estado "DOMINIO_SSL" "$DOMINIO_SSL"
             export DOMINIO_SSL
-            log_ok "Dominio SSL configurado: $DOMINIO_SSL"
+            log_ok "Dominio SSL configurado y guardado globalmente: $DOMINIO_SSL"
         else
             log_error "Formato inválido. Se mantiene: $DOMINIO_SSL"
         fi
     fi
     pausa
+}
+
+_auto_descargar_binarios() {
+    local base="$1"
+    export DEBIAN_FRONTEND=noninteractive
+    local tmp_dir="/tmp/auto_repo"
+    mkdir -p "$tmp_dir" && cd "$tmp_dir" || return
+
+    # 1. Descarga silenciosa de Apache y Nginx vía APT
+    for motor in apache2 nginx; do
+        local carpeta="Apache"
+        [ "$motor" == "nginx" ] && carpeta="Nginx"
+
+        apt-get download "$motor" >/dev/null 2>&1
+        for f in ${motor}*.deb; do
+            [ -f "$f" ] || continue
+            mv "$f" "$base/$carpeta/"
+            sha256sum "$base/$carpeta/$f" | awk '{print $1}' > "$base/$carpeta/$f.sha256"
+        done
+    done
+
+    # 2. Descarga de Tomcat scrapeando el mirror oficial de Apache
+    local tomcat_ver=$(curl -s https://archive.apache.org/dist/tomcat/tomcat-10/ | grep -oP 'v10\.[0-9]+\.[0-9]+' | sort -uV | tail -1 | sed 's/v//')
+    if [ -n "$tomcat_ver" ]; then
+        local t_url="https://archive.apache.org/dist/tomcat/tomcat-10/v${tomcat_ver}/bin/apache-tomcat-${tomcat_ver}.tar.gz"
+        local t_dest="$base/Tomcat/apache-tomcat-${tomcat_ver}.tar.gz"
+        if [ ! -f "$t_dest" ]; then
+            # El flag -# dibuja la barra de carga bonita que querías sin asfixiar la consola
+            if curl -f -s -# "$t_url" -o "$t_dest"; then
+                sha256sum "$t_dest" | awk '{print $1}' > "${t_dest}.sha256"
+            else
+                rm -f "$t_dest"
+            fi
+        fi
+    fi
+
+    # 3. Limpieza y asignación de permisos
+    cd / && rm -rf "$tmp_dir"
+    chown -R root:ftp_auth "$base" 2>/dev/null
+    find "$base" -type d -exec chmod 2775 {} \; 2>/dev/null
+    find "$base" -type f -exec chmod 664 {} \; 2>/dev/null
+}
+
+auditoria_pre_vuelo() {
+    clear
+    echo -e "${AZUL}[*] Iniciando Secuencia de Auditoría Pre-Vuelo...${RESET}"
+
+    # Validar si el DNS está vivo (Evita la trampa de resolución falsa)
+    if [ -z "$(ls -A /var/cache/bind/db.* 2>/dev/null)" ]; then
+        log_warning "No hay zonas DNS locales. La resolución SSL dependerá del archivo 'hosts' del cliente."
+    fi
+
+    local repo_base="/var/ftp_master/http/Linux"
+    local falta_binario=0
+
+    # Garantizamos que la estructura FTP exista, incluso si el usuario no entró al Módulo 05
+    getent group ftp_auth >/dev/null 2>&1 || groupadd ftp_auth
+    
+    for motor in Apache Nginx Tomcat; do
+        mkdir -p "$repo_base/$motor"
+        if [ "$motor" == "Tomcat" ]; then
+            [ -z "$(ls -A "$repo_base/$motor"/*.tar.gz 2>/dev/null)" ] && falta_binario=1
+        else
+            [ -z "$(ls -A "$repo_base/$motor"/*.deb 2>/dev/null)" ] && falta_binario=1
+        fi
+    done
+
+    # Decisión de Orquestación Híbrida
+    if [ $falta_binario -eq 1 ]; then
+        if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+            echo -e "${CIAN}[*] Repositorio FTP incompleto. Auto-descargando binarios seguros...${RESET}"
+            guardar_estado "MODO_OFFLINE" "false"
+            _auto_descargar_binarios "$repo_base"
+            log_ok "Bóveda sincronizada exitosamente."
+        else
+            log_error "Faltan binarios en el FTP y NO hay conexión a Internet."
+            log_warning "El despliegue WEB estará bloqueado (MODO OFFLINE ESTRICTO)."
+            guardar_estado "MODO_OFFLINE" "true"
+        fi
+    else
+        guardar_estado "MODO_OFFLINE" "false"
+        log_ok "Repositorio FTP íntegro y validado."
+    fi
+    sleep 2
 }
 
 # ============================================================
@@ -269,13 +444,39 @@ activar_ssl_desde_menu() {
         [ -z "$puerto_forzado" ] && puerto_forzado=80
     fi
 
-    echo -e "\n${AZUL}Motor: ${motor_forzado^^} | Puerto HTTP actual: $puerto_forzado | Dominio SSL: $DOMINIO_SSL${RESET}\n"
+echo -e "\n${AZUL}Motor: ${motor_forzado^^} | Puerto HTTP actual: $puerto_forzado | Dominio SSL: $DOMINIO_SSL${RESET}\n"
+
+    # --- NUEVO BLOQUE: CAPTURA DINÁMICA DEL PUERTO SSL ---
+    local puerto_ssl=443
+    
+    # Tomcat por defecto en la rúbrica y en la industria usa el 8443 para SSL
+    if [ "$motor_forzado" != "tomcat" ]; then
+        while true; do
+            local input_ssl=$(capturar_entero "Ingrese el puerto seguro SSL (Sugerido: 443 o 444) [Enter para 443]")
+            [ -z "$input_ssl" ] && input_ssl=443
+            
+            validar_puerto "$input_ssl"
+            local ep=$?
+            if [ $ep -eq 0 ]; then
+                puerto_ssl=$input_ssl
+                break
+            else
+                log_error "El puerto $input_ssl está ocupado. Elija otro para evitar que $motor_forzado colapse."
+            fi
+        done
+    else
+        puerto_ssl=8443
+        log_info "Tomcat utilizará el puerto seguro predeterminado: 8443"
+    fi
+
+    echo -e "${CIAN}[*] Generando llaves criptográficas e inyectando VirtualHost seguro en el puerto $puerto_ssl...${RESET}"
 
     local resultado=1
     case "$motor_forzado" in
-        apache2) activar_ssl_apache2 "$DOMINIO_SSL" "$puerto_forzado"; resultado=$? ;;
-        nginx)   activar_ssl_nginx   "$DOMINIO_SSL" "$puerto_forzado"; resultado=$? ;;
-        tomcat)  activar_ssl_tomcat  "$DOMINIO_SSL";                   resultado=$? ;;
+        # Pasamos los 3 parámetros: Dominio, Puerto HTTP original (para redirección) y el nuevo Puerto SSL
+        apache2) activar_ssl_apache2 "$DOMINIO_SSL" "$puerto_forzado" "$puerto_ssl"; resultado=$? ;;
+        nginx)   activar_ssl_nginx   "$DOMINIO_SSL" "$puerto_forzado" "$puerto_ssl"; resultado=$? ;;
+        tomcat)  activar_ssl_tomcat  "$DOMINIO_SSL";                                 resultado=$? ;;
     esac
 
     [ $resultado -eq 0 ] && \
@@ -314,6 +515,9 @@ activar_ftps_menu() {
 # MENÚ PRINCIPAL P7
 # ============================================================
 menu_ssl() {
+    # ---> 1. DISPARAMOS EL PRE-FLIGHT CHECK AQUÍ <---
+    auditoria_pre_vuelo
+
     local opciones_p7=(
         "Instalar Servidor HTTP (WEB o FTP + SSL opcional)"
         "Activar SSL/TLS en servidor ya instalado"
@@ -324,7 +528,10 @@ menu_ssl() {
     )
 
     while true; do
-        # Actualizar etiqueta del dominio en el menú
+        # ---> 2. ACTUALIZACIÓN DINÁMICA DEL DOMINIO EN RAM <---
+        DOMINIO_SSL=$(leer_estado "DOMINIO_SSL")
+        [ -z "$DOMINIO_SSL" ] && DOMINIO_SSL="reprobados.com"
+        
         opciones_p7[5]="Configurar dominio para certificados [actual: $DOMINIO_SSL]"
 
         generar_menu "P7 — INFRAESTRUCTURA DE DESPLIEGUE SEGURO" opciones_p7 "Volver al Menú Principal"

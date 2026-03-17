@@ -85,6 +85,7 @@ EOF
 activar_ssl_apache2() {
     local dominio="$1"
     local puerto_http="${2:-80}"
+    local puerto_ssl="${3:-443}" # Parámetro dinámico para evitar colisiones
 
     local crt="$DIR_SSL/$dominio.crt"
     local key="$DIR_SSL/$dominio.key"
@@ -100,20 +101,24 @@ activar_ssl_apache2() {
     chown root:www-data "$key"
     chmod 640 "$key"
 
-    # Habilitar módulos requeridos
-    a2enmod ssl     >> "$LOG_FILE" 2>&1
-    a2enmod rewrite >> "$LOG_FILE" 2>&1
-    a2enmod headers >> "$LOG_FILE" 2>&1
+    a2enmod ssl rewrite headers >> "$LOG_FILE" 2>&1
 
-    # Agregar Listen 443 si no existe (preservando el 80 existente)
-    if ! grep -q "^Listen 443" /etc/apache2/ports.conf; then
-        echo "Listen 443" >> /etc/apache2/ports.conf
+    # SNAPSHOT: Respaldo de seguridad (Idempotente)
+    local conf_default="/etc/apache2/sites-available/000-default.conf"
+    if [ -f "$conf_default" ] && [ ! -f "${conf_default}.bak_admin" ]; then
+        cp "$conf_default" "${conf_default}.bak_admin"
+        log_info "Snapshot de seguridad HTTP creado para Apache2."
     fi
 
-    # Crear VirtualHost SSL (idempotente: sobreescribe si ya existe)
+    # Agregar Listen dinámico
+    if ! grep -q "^Listen $puerto_ssl" /etc/apache2/ports.conf; then
+        echo "Listen $puerto_ssl" >> /etc/apache2/ports.conf
+    fi
+
+    # Crear VirtualHost SSL
     cat > /etc/apache2/sites-available/001-ssl.conf <<EOF
 # P7 — SSL VirtualHost generado automáticamente
-<VirtualHost *:443>
+<VirtualHost *:$puerto_ssl>
     ServerName $dominio
     ServerAlias www.$dominio
     DocumentRoot /var/www/apache2
@@ -132,24 +137,20 @@ activar_ssl_apache2() {
         AllowOverride None
         Require all granted
     </Directory>
-
-    ErrorLog  \${APACHE_LOG_DIR}/ssl_error.log
-    CustomLog \${APACHE_LOG_DIR}/ssl_access.log combined
 </VirtualHost>
 
-# Redirección HTTP → HTTPS
+# Redirección HTTP → HTTPS usando el puerto SSL dinámico
 <VirtualHost *:$puerto_http>
     ServerName $dominio
     ServerAlias www.$dominio
     RewriteEngine On
-    RewriteRule ^(.*)$ https://$dominio\$1 [R=301,L]
+    RewriteRule ^(.*)$ https://$dominio:$puerto_ssl\$1 [R=301,L]
 </VirtualHost>
 EOF
 
     a2ensite 001-ssl >> "$LOG_FILE" 2>&1
-    ufw allow 443/tcp >/dev/null 2>&1
+    ufw allow "$puerto_ssl"/tcp >/dev/null 2>&1
 
-    # Validar config antes de reiniciar
     if apache2ctl configtest >> "$LOG_FILE" 2>&1; then
         systemctl restart apache2 >> "$LOG_FILE" 2>&1
     else
@@ -158,7 +159,7 @@ EOF
     fi
 
     if systemctl is-active --quiet apache2; then
-        log_ok "Apache2 SSL activo → https://$dominio (443)"
+        log_ok "Apache2 SSL activo → https://$dominio:$puerto_ssl"
         return 0
     else
         log_error "Apache2 no pudo reiniciar con SSL."
@@ -172,6 +173,7 @@ EOF
 activar_ssl_nginx() {
     local dominio="$1"
     local puerto_http="${2:-80}"
+    local puerto_ssl="${3:-443}"
 
     local crt="$DIR_SSL/$dominio.crt"
     local key="$DIR_SSL/$dominio.key"
@@ -186,12 +188,19 @@ activar_ssl_nginx() {
     chown root:www-data "$key"
     chmod 640 "$key"
 
-    # Reescribir sites-available/default con SSL + redirección
-    cat > /etc/nginx/sites-available/default <<EOF
+    local conf_nginx="/etc/nginx/sites-available/default"
+    
+    # SNAPSHOT: Respaldo de seguridad (Idempotente)
+    if [ -f "$conf_nginx" ] && [ ! -f "${conf_nginx}.bak_admin" ]; then
+        cp "$conf_nginx" "${conf_nginx}.bak_admin"
+        log_info "Snapshot de seguridad HTTP creado para Nginx."
+    fi
+
+    cat > "$conf_nginx" <<EOF
 # P7 — Nginx SSL generado automáticamente
 server {
-    listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
+    listen $puerto_ssl ssl default_server;
+    listen [::]:$puerto_ssl ssl default_server;
 
     server_name $dominio www.$dominio;
     root /var/www/nginx;
@@ -201,8 +210,6 @@ server {
     ssl_certificate_key $key;
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
-    ssl_session_cache   shared:SSL:10m;
-    ssl_session_timeout 10m;
 
     # HSTS básico
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
@@ -222,11 +229,16 @@ server {
     listen $puerto_http default_server;
     listen [::]:$puerto_http default_server;
     server_name $dominio www.$dominio;
-    return 301 https://\$host\$request_uri;
+    
+    # Redirige usando el puerto SSL dinámico si no es 443
+    if (\$host = $dominio) {
+        return 301 https://\$host:$puerto_ssl\$request_uri;
+    }
+    return 404;
 }
 EOF
 
-    ufw allow 443/tcp >/dev/null 2>&1
+    ufw allow "$puerto_ssl"/tcp >/dev/null 2>&1
 
     if nginx -t >> "$LOG_FILE" 2>&1; then
         systemctl restart nginx >> "$LOG_FILE" 2>&1
@@ -236,7 +248,7 @@ EOF
     fi
 
     if systemctl is-active --quiet nginx; then
-        log_ok "Nginx SSL activo → https://$dominio (443)"
+        log_ok "Nginx SSL activo → https://$dominio:$puerto_ssl"
         return 0
     else
         log_error "Nginx no pudo reiniciar con SSL."
