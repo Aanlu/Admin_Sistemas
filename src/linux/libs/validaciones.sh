@@ -117,3 +117,9 @@ capturar_usuario_seguro() {
         fi
     done
 }
+
+cidr_a_mascara() {
+    local prefijo=$1
+    local mascara=$((0xffffffff << (32 - prefijo)))
+    echo "$(( (mascara >> 24) & 255 )).$(( (mascara >> 16) & 255 )).$(( (mascara >> 8) & 255 )).$(( mascara & 255 ))"
+}

@@ -12,7 +12,15 @@ ZONA_SELECCIONADA=""
 verificar_ip_fija() {
     clear
     echo -e "${AMARILLO}--- VERIFICACIÓN DE RED ESTÁTICA ---${RESET}"
-    local iface="enp0s8" 
+    
+    # Usamos nuestra función dinámica para no depender de nombres fijos
+    seleccionar_interfaz_dinamica
+    if [ $? -ne 0 ]; then
+        log_warning "Verificación de red cancelada."
+        pausa; return
+    fi
+    local iface="$INTERFAZ_SELECCIONADA"
+    
     local ip_actual=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
     
     if [ -z "$ip_actual" ]; then
@@ -23,10 +31,14 @@ verificar_ip_fija() {
 
     if confirmar_accion "¿Desea asignar una nueva IP fija antes de continuar?"; then
         local nueva_ip=$(capturar_ip "Ingrese la nueva IP fija a asignar")
-        local mascara=$(obtener_mascara "$nueva_ip")
-        local cidr=24
-        [ "$mascara" == "255.0.0.0" ] && cidr=8
-        [ "$mascara" == "255.255.0.0" ] && cidr=16
+        
+        local cidr
+        while true; do
+            read -p "Prefijo de red (CIDR, ej. 24) [Enter para usar /24]: " cidr
+            [ -z "$cidr" ] && cidr=24
+            if [[ "$cidr" =~ ^[0-9]+$ ]] && [ "$cidr" -ge 8 ] && [ "$cidr" -le 30 ]; then break; fi
+            log_error "Prefijo CIDR inválido. Use un número entre 8 y 30."
+        done
         
         if systemctl is-active --quiet ssh; then
             local usuario_actual=$USER
@@ -122,8 +134,13 @@ forzar_resolucion_local() {
         resolvectl dns "$interface" "$dns_ip" 2>/dev/null || true
     fi
 
-    if [ -L /etc/resolv.conf ]; then
-        rm -f /etc/resolv.conf
+# Manejo seguro de resolv.conf (Nunca destruir, siempre respaldar)
+    if [ -L /etc/resolv.conf ] || [ -f /etc/resolv.conf ]; then
+        if [ ! -f /etc/resolv.conf.bak_admin_sistemas ]; then
+            mv /etc/resolv.conf /etc/resolv.conf.bak_admin_sistemas
+        else
+            rm -f /etc/resolv.conf
+        fi
     fi
     
     cat > /etc/resolv.conf <<EOF
@@ -254,6 +271,7 @@ agregar_registro() {
             
             local salida_bind
             if salida_bind=$(named-checkzone "$dominio" "$archivo_zona" 2>&1); then
+                sed -i -E 's/[0-9]+(\s*;\s*Serial)/'"$(date +%Y%m%d%H)"'\1/i' "$archivo_zona"
                 rm "$archivo_zona.bak"
                 systemctl restart bind9
                 log_ok "Registro actualizado y servicio DNS reiniciado correctamente."
@@ -318,6 +336,7 @@ eliminar_registro() {
     if grep -q "^$host\s" "$archivo_zona"; then
         if confirmar_accion "¿Confirma la eliminación permanente del host seleccionado?"; then
             sed -i "/^$host\s.*IN\s.*A/d" "$archivo_zona"
+            sed -i -E 's/[0-9]+(\s*;\s*Serial)/'"$(date +%Y%m%d%H)"'\1/i' "$archivo_zona"
             systemctl restart bind9
             log_ok "Registro de host eliminado correctamente."
         else
@@ -336,9 +355,23 @@ validar_resolucion() {
     [ $estado -eq 2 ] && return
 
     local dominio="$ZONA_SELECCIONADA"
-    
+
     clear
     echo -e "${AMARILLO}--- VALIDACIÓN Y PRUEBAS DE RESOLUCIÓN ---${RESET}"
+
+    echo -e "\n${AZUL}[ Zonas DNS registradas en este servidor ]${RESET}"
+    printf "${AMARILLO}%-30s %-10s${RESET}\n" "DOMINIO" "ESTADO"
+    echo "--------------------------------------------"
+    for archivo in "$DIR_ZONAS"/db.*; do
+        [ -f "$archivo" ] || continue
+        local z=$(basename "$archivo"); z="${z#db.}"
+        if named-checkzone "$z" "$archivo" >/dev/null 2>&1; then
+            printf "%-30s ${VERDE}%-10s${RESET}\n" "$z" "OK"
+        else
+            printf "%-30s ${ROJO}%-10s${RESET}\n" "$z" "ERROR"
+        fi
+    done
+    echo ""
     
     echo -e "\n${AZUL}Fase 1: Verificación de Sintaxis con checkconf...${RESET}"
     if named-checkconf >/dev/null 2>&1; then
@@ -348,7 +381,7 @@ validar_resolucion() {
     fi
 
     echo -e "\n${AZUL}Fase 2: Prueba de Resolución local mediante nslookup...${RESET}"
-    nslookup "$dominio" || log_error "Fallo en la resolución del servidor de nombres."
+    nslookup "$dominio" 127.0.0.1 || log_error "Fallo en la resolución del servidor de nombres."
 
     echo -e "\n${AZUL}Fase 3: Prueba de Conectividad de red hacia el subdominio web...${RESET}"
     ping -c 3 "www.$dominio" || log_warning "Paquetes perdidos. Posible bloqueo de cortafuegos ICMP o equipo apagado."

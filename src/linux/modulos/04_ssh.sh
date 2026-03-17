@@ -15,8 +15,6 @@ configurar_interfaz_ssh() {
 
     # El resto de tu código a partir de aquí se mantiene exactamente igual...
     local ip_server=$(capturar_ip "IP del Servidor SSH" "100.0.0.10")
-    # ...
-    local ip_client=$(capturar_ip "IP sugerida para el Cliente" "100.0.0.11")
     local cidr="24"
     
     echo -e "${CIAN}[1/3] Levantando administrativamente $interface...${RESET}"
@@ -31,9 +29,16 @@ configurar_interfaz_ssh() {
         echo -e "${VERDE}[2/3] Servicio SSH ya instalado y activo.${RESET}"
     fi
 
-    echo -e "${CIAN}[3/3] Aplicando topología de red...${RESET}"
-    ip addr flush dev "$interface" 2>/dev/null
-    ip addr add "$ip_server/$cidr" dev "$interface" 2>/dev/null
+    echo -e "${CIAN}[3/3] Aplicando topología de red de forma segura...${RESET}"
+    
+    # 1. Reemplazo atómico para no tirar el túnel SSH si estamos conectados
+    ip addr replace "$ip_server/$cidr" dev "$interface" 2>/dev/null
+    
+    # 2. Limpiamos silenciosamente IPs anteriores que no sean la nueva
+    ip -4 addr show dev "$interface" | grep "inet" | grep -v "$ip_server" | awk '{print $2}' | while read -r old_ip; do
+        ip addr del "$old_ip" dev "$interface" 2>/dev/null
+    done
+    
     systemctl restart ssh
 
     # 3. Auditoría Inteligente: Polling en lugar de Sleep
@@ -56,12 +61,16 @@ configurar_interfaz_ssh() {
         echo -e "\n${VERDE}========================================================================${RESET}"
         echo -e "${AMARILLO}  [!] CONFIGURACIÓN REQUERIDA EN LA MÁQUINA VIRTUAL CLIENTE [!]${RESET}"
         echo -e "${VERDE}========================================================================${RESET}"
-        echo -e "La red de administración está operativa. Ejecuta en tu VM Cliente:\n"
-        echo -e "  ${CIAN}sudo ip link set dev <INTERFAZ_CLIENTE> up${RESET}"
-        echo -e "  ${CIAN}sudo ip addr flush dev <INTERFAZ_CLIENTE>${RESET}"
-        echo -e "  ${CIAN}sudo ip addr add $ip_client/$cidr dev <INTERFAZ_CLIENTE>${RESET}\n"
-        echo -e "Comando de conexión remoto:"
+        echo -e "Interfaz de puente activa: ${VERDE}$interface${RESET}"
+        echo -e "IP asignada al servidor: ${VERDE}$ip_server/$cidr${RESET}\n"
+        echo -e "Comando de conexión desde el host físico:"
         echo -e "  ${AMARILLO}ssh ${SUDO_USER:-$USER}@$ip_server${RESET}"
+        echo -e "\nPara VSCode Remote SSH — añadir en ~/.ssh/config del host:"
+        echo -e "  ${CIAN}Host vm-linux${RESET}"
+        echo -e "  ${CIAN}  HostName $ip_server${RESET}"
+        echo -e "  ${CIAN}  User ${SUDO_USER:-$USER}${RESET}"
+        echo -e "  ${CIAN}  ServerAliveInterval 30${RESET}"
+        echo -e "  ${CIAN}  ServerAliveCountMax 3${RESET}"
         echo -e "${VERDE}========================================================================${RESET}"
     else
         log_error "Fallo crítico: El servicio SSH o la interfaz no se inicializaron a tiempo."
@@ -88,7 +97,7 @@ alternar_ssh() {
 
 menu_ssh() {
     local opciones_ssh=(
-        "Desplegar Red de Administración SSH (enp0s9)"
+        "Desplegar Red de Administración SSH (Interfaz Dinámica)"
         "Alternar Estado del Servicio (Start/Stop)"
     )
     

@@ -4,41 +4,38 @@ source libs/validaciones.sh
 
 gestionar_instalacion() {
     clear
-    echo -e "${AMARILLO}--- GESTIÓN DE INSTALACIÓN ---${RESET}"
+    echo -e "${AMARILLO}--- MANTENIMIENTO DEL SERVICIO DHCP ---${RESET}"
+    log_info "Esta opción realizará una purga total y reinstalación limpia."
     
-    if dpkg -s isc-dhcp-server >/dev/null 2>&1; then
-        log_ok "El servicio DHCP ya se encuentra instalado."
+    if confirmar_accion "¿Desea PURGAR y REINSTALAR el servicio DHCP (borrará configuraciones)?"; then
+        echo -e "${AMARILLO}[AVISO] Purgando el servicio silenciosamente...${RESET}"
+        export DEBIAN_FRONTEND=noninteractive
         
-        if confirmar_accion "¿Desea realizar una REINSTALACIÓN completa (borrará configuraciones)?"; then
-            echo -e "${AMARILLO}[AVISO] Purgando y reinstalando el servicio silenciosamente...${RESET}"
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get purge -yq isc-dhcp-server >/dev/null 2>>"$LOG_FILE"
-            apt-get update -qq >/dev/null 2>>"$LOG_FILE"
-            
-            if apt-get install -yq isc-dhcp-server >/dev/null 2>>"$LOG_FILE"; then
-                echo -e "\e[1A\e[K${VERDE}[OK] Reinstalación limpia finalizada correctamente.${RESET}"
-            else
-                echo -e "\e[1A\e[K${ROJO}[ERROR] Fallo en la reinstalación. Revise los logs.${RESET}"
-            fi
+        # Detenemos primero para evitar errores de dpkg
+        systemctl stop isc-dhcp-server 2>/dev/null
+        
+        apt-get purge -yq isc-dhcp-server >/dev/null 2>>"$LOG_FILE"
+        # Limpiamos remanentes de configuración que el purge suele dejar
+        rm -rf /etc/dhcp/ 2>/dev/null 
+        
+        apt-get update -qq >/dev/null 2>>"$LOG_FILE"
+        
+        if apt-get install -yq isc-dhcp-server >/dev/null 2>>"$LOG_FILE"; then
+            echo -e "\e[1A\e[K${VERDE}[OK] Reinstalación limpia finalizada correctamente.${RESET}"
         else
-            log_warning "Acción cancelada por el usuario."
+            echo -e "\e[1A\e[K${ROJO}[ERROR] Fallo en la reinstalación. Revise $LOG_FILE.${RESET}"
         fi
     else
-        log_warning "Dependencias DHCP NO encontradas."
-        if confirmar_accion "¿Desea instalar el servicio DHCP ahora?"; then
-            instalar_dependencia_silenciosa "isc-dhcp-server"
-        else
-            log_warning "Instalación cancelada."
-        fi
+        log_warning "Acción cancelada."
     fi
     pausa
 }
 
 configurar_dhcp() {
+
     if ! dpkg -s isc-dhcp-server >/dev/null 2>&1; then
-        clear
-        log_error "El servicio no está instalado. Ejecute 'Gestión de Instalación' primero."
-        pausa; return
+        log_warning "Servicio DHCP no detectado. Instalando automáticamente..."
+        instalar_dependencia_silenciosa "isc-dhcp-server" || { pausa; return; }
     fi
 
     seleccionar_interfaz_dinamica
@@ -55,7 +52,6 @@ configurar_dhcp() {
     read -p "Nombre del Ámbito (Scope): " scope
     
     local ip_inicial=$(capturar_ip "IP Inicial del servidor/rango DHCP")
-    local red_dhcp=$(obtener_id_red "$ip_inicial" "$(obtener_mascara "$ip_inicial")")
     
     local ip_final
     while true; do
@@ -91,13 +87,29 @@ configurar_dhcp() {
         log_error "Debe ser un número entero positivo."
     done
 
-    local mascara=$(obtener_mascara "$ip_inicial")
-    local subnet=$(obtener_id_red "$ip_inicial" "$mascara")
-    local cidr=24
-    [ "$mascara" == "255.0.0.0" ] && cidr=8
-    [ "$mascara" == "255.255.0.0" ] && cidr=16
+    local cidr
+    while true; do
+        read -p "Prefijo de red (CIDR, ej. 24 para 255.255.255.0) [Enter para usar /24]: " cidr
+        [ -z "$cidr" ] && cidr=24 # Por defecto usamos /24 que es el estándar de facto
+        if [[ "$cidr" =~ ^[0-9]+$ ]] && [ "$cidr" -ge 8 ] && [ "$cidr" -le 30 ]; then break; fi
+        log_error "Prefijo CIDR inválido. Use un número entre 8 y 30."
+    done
 
-    sed -i "s/INTERFACESv4=.*/INTERFACESv4=\"$interface\"/g" /etc/default/isc-dhcp-server
+    # Llamamos a nuestra nueva función matemática
+    local mascara=$(cidr_a_mascara "$cidr")
+    local subnet=$(obtener_id_red "$ip_inicial" "$mascara")
+
+    local file_default="/etc/default/isc-dhcp-server"
+    if grep -q "^INTERFACESv4=" "$file_default"; then
+        # Si la variable existe y está activa, la modificamos
+        sed -i "s/^INTERFACESv4=.*/INTERFACESv4=\"$interface\"/g" "$file_default"
+    elif grep -q "^#INTERFACESv4=" "$file_default" || grep -q "^# INTERFACESv4=" "$file_default"; then
+        # Si existe pero está comentada, la descomentamos y modificamos
+        sed -i -E "s/^#\s*INTERFACESv4=.*/INTERFACESv4=\"$interface\"/g" "$file_default"
+    else
+        # Si de plano no existe, la añadimos al final
+        echo "INTERFACESv4=\"$interface\"" >> "$file_default"
+    fi
 
     cat > /etc/dhcp/dhcpd.conf <<EOL
 default-lease-time $lease_time;
@@ -112,9 +124,16 @@ subnet $subnet netmask $mascara {
 }
 EOL
 
-    echo -e "${CIAN}Limpiando IPs anteriores y asignando $ip_inicial a $interface...${RESET}"
-    ip addr flush dev "$interface"
-    ip addr add "$ip_inicial/$cidr" dev "$interface"
+    echo -e "${CIAN}Asignando IP estática $ip_inicial/$cidr a $interface de forma segura...${RESET}"
+    
+    # 1. Actualización atómica: Reemplaza o añade la nueva IP sin tumbar el enlace lógico
+    ip addr replace "$ip_inicial/$cidr" dev "$interface"
+    
+    # 2. Limpieza selectiva: Busca IPs viejas en esa interfaz y las borra una por una,
+    # excepto la que acabamos de configurar. Evita desconexiones abruptas si hay aliases.
+    ip -4 addr show dev "$interface" | grep "inet" | grep -v "$ip_inicial" | awk '{print $2}' | while read -r old_ip; do
+        ip addr del "$old_ip" dev "$interface" 2>/dev/null
+    done
 
     echo -e "${CIAN}Reiniciando isc-dhcp-server...${RESET}"
     systemctl restart isc-dhcp-server
@@ -136,9 +155,14 @@ EOL
         # 3. Forzamos a la interfaz específica a usar este DNS (evita fugas hacia otras interfaces)
         resolvectl dns "$interface" "$dns_primario" 2>/dev/null || true
         
-        # 4. Destruimos el enlace dinámico si existe y creamos el archivo estático
-        if [ -L /etc/resolv.conf ]; then
-            rm -f /etc/resolv.conf
+        # 4. Manejo seguro de resolv.conf (Nunca destruir, siempre respaldar)
+        if [ -L /etc/resolv.conf ] || [ -f /etc/resolv.conf ]; then
+            # Hacemos backup solo si el backup no existe ya (idempotencia)
+            if [ ! -f /etc/resolv.conf.bak_admin_sistemas ]; then
+                mv /etc/resolv.conf /etc/resolv.conf.bak_admin_sistemas
+            else
+                rm -f /etc/resolv.conf # Si ya hay backup, podemos borrar el actual seguro
+            fi
         fi
         
         cat > /etc/resolv.conf <<EOF

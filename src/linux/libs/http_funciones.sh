@@ -147,14 +147,14 @@ configurar_puerto_servicio() {
     local motor=$1
     local puerto=$2
 
-    fuser -k -n tcp "$puerto" >/dev/null 2>&1
 
     case $motor in
         apache2)
             if [ ! -f /etc/apache2/ports.conf ]; then
                 echo "Listen $puerto" > /etc/apache2/ports.conf
             else
-                sed -i -E "s/^Listen [0-9]+/Listen $puerto/g" /etc/apache2/ports.conf
+                # Magia de SysAdmin: Ignoramos la línea que tenga 443 (SSL) y modificamos cualquier otra
+                sed -i -e '/^Listen 443/b' -e "s/^Listen [0-9]\+/Listen $puerto/g" /etc/apache2/ports.conf
             fi
             mkdir -p /var/www/apache2
             if [ -f /etc/apache2/sites-available/000-default.conf ]; then
@@ -180,7 +180,10 @@ EOF
             systemctl restart nginx >/dev/null 2>&1
             ;;
         tomcat)
-            [ -f /opt/tomcat/conf/server.xml ] && sed -i -E "s/Connector port=\"[0-9]+\"/Connector port=\"$puerto\"/g" /opt/tomcat/conf/server.xml
+            if [ -f /opt/tomcat/conf/server.xml ]; then
+                # Solo modifica el Connector HTTP/1.1 (evita tocar el de shutdown puerto 8005 y el SSL 8443)
+                sed -i -E '/protocol="HTTP\/1\.1"/{s/Connector port="[0-9]+"/Connector port="'"$puerto"'"/}' /opt/tomcat/conf/server.xml
+            fi
             systemctl restart tomcat >/dev/null 2>&1
             ;;
     esac
@@ -211,8 +214,17 @@ aplicar_hardening_seguridad() {
             fi
             systemctl restart apache2 >> "$LOG_FILE" 2>&1
             ;;
-        nginx)
-            [ -f /etc/nginx/nginx.conf ] && sed -i 's/.*server_tokens off;/        server_tokens off;/g' /etc/nginx/nginx.conf
+            nginx)
+            if [ -f /etc/nginx/nginx.conf ]; then
+                # Si existe comentada, la descomentamos limpiamente
+                if grep -q "#\s*server_tokens off;" /etc/nginx/nginx.conf; then
+                    sed -i -E 's/.*#\s*server_tokens off;.*/    server_tokens off;/g' /etc/nginx/nginx.conf
+                # Si no existe en absoluto (ni comentada ni activa), la inyectamos dentro del bloque http
+                elif ! grep -q "server_tokens off;" /etc/nginx/nginx.conf; then
+                    sed -i '/http {/a \ \ \ \ server_tokens off;' /etc/nginx/nginx.conf
+                fi
+            fi
+            
             if [ -f /etc/nginx/nginx.conf ] && ! grep -q "X-Frame-Options" /etc/nginx/nginx.conf; then
                 sed -i '/http {/a \ \ \ \ add_header X-Content-Type-Options nosniff;' /etc/nginx/nginx.conf
                 sed -i '/http {/a \ \ \ \ add_header X-Frame-Options SAMEORIGIN;' /etc/nginx/nginx.conf
@@ -262,10 +274,11 @@ desplegar_plantilla_html() {
 
     if [ -f "$ruta_template" ]; then
         cp "$ruta_template" "$ruta_html"
-        sed -i "s/@@MOTOR@@/${motor^^}/g" "$ruta_html"
-        sed -i "s/@@VERSION@@/$version/g" "$ruta_html"
-        sed -i "s/@@PUERTO@@/$puerto/g" "$ruta_html"
+        sed -i "s|@@MOTOR@@|${motor^^}|g" "$ruta_html"
+        sed -i "s|@@VERSION@@|$version|g" "$ruta_html"
+        sed -i "s|@@PUERTO@@|$puerto|g" "$ruta_html"
     else
-        echo "<h1>Servidor: ${motor^^} - Version: $version - Puerto: $puerto</h1>" > "$ruta_html"
+        printf '<h1>%s — v%s</h1>\n<p>Puerto: <span id="puerto-display">%s</span></p>\n' \
+            "${motor^^}" "$version" "$puerto" > "$ruta_html"
     fi
 }

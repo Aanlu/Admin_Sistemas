@@ -50,7 +50,7 @@ desplegar_servidor_http(){
             saltar_instalacion=1
         elif dpkg --compare-versions "$version_instalada" lt "$version_seleccionada"; then
             echo -e "\n${CIAN}[ACTUALIZACIÓN] Tiene la versión $version_instalada. ¿Desea actualizar a la $version_seleccionada?${RESET}"
-            if ! confirmar_accion; then return 0; fi
+            if ! confirmar_accion "¿Desea actualizar a la versión $version_seleccionada?"; then return 0; fi
         else
             echo -e "\n${ROJO}[PELIGRO] Tiene una versión superior ($version_instalada). Forzar una inferior ($version_seleccionada) ejecutará una purga total previa.${RESET}"
             if ! confirmar_accion "¿Desea forzar la degradación (Downgrade)?"; then return 0; fi
@@ -233,10 +233,11 @@ modificar_puerto_caliente() {
     systemctl stop "$motor" >> "$LOG_FILE" 2>&1
     
     echo -e "${CIAN}[*] Inyectando el puerto $puerto_nuevo y actualizando el Firewall...${RESET}"
-    if configurar_puerto_servicio "$motor" "$puerto_nuevo"; then
+        if configurar_puerto_servicio "$motor" "$puerto_nuevo"; then
         
         if [ -n "$puerto_viejo" ]; then
-            ufw deny "$puerto_viejo"/tcp >> "$LOG_FILE" 2>&1
+            # Borramos la regla original de permitir, manteniendo el firewall limpio
+            ufw delete allow "$puerto_viejo"/tcp >> "$LOG_FILE" 2>&1
         fi
 
         local ruta_html="/var/www/$motor/index.html"

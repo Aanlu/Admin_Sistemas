@@ -26,8 +26,8 @@ gestionar_instalacion_ftp() {
     
     [ ! -f "${CONF_FTP}.bak" ] && cp "$CONF_FTP" "${CONF_FTP}.bak"
 
-    # Se agregó file_open_mode=0777 para que junto al umask 002, 
-    # garantice permisos rwxrwxr-x y borrado cruzado perfecto.
+# file_open_mode=0666 + local_umask=002 → permisos reales 0664 (rw-rw-r--)
+    # El borrado cruzado entre miembros del grupo lo garantiza chmod 2775 en el directorio.
     cat > "$CONF_FTP" <<EOF
 listen=NO
 listen_ipv6=YES
@@ -35,7 +35,9 @@ anonymous_enable=YES
 local_enable=YES
 write_enable=YES
 local_umask=002
-file_open_mode=0777
+# SEGURIDAD: 0666 menos umask 002 = 0664 (rw-rw-r--). 
+# Evita que los archivos subidos tengan permisos de ejecución.
+file_open_mode=0666
 dirmessage_enable=YES
 use_localtime=YES
 xferlog_enable=YES

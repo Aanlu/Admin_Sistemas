@@ -14,6 +14,7 @@ opciones_principales=(
     "SSH"
     "FTP"
     "HTTP"
+    "SSL / Repositorio FTP"
 )
 
 while true; do
@@ -28,6 +29,7 @@ while true; do
         3) bash modulos/04_ssh.sh ;;
         4) bash modulos/05_ftp.sh ;;
         5) bash modulos/06_http.sh ;;
-        6) clear; echo -e "${VERDE}Cerrando sistema...${RESET}"; exit 0 ;;
+        6) bash modulos/07_ssl.sh ;;
+        7) clear; echo -e "${VERDE}Cerrando sistema...${RESET}"; exit 0 ;;
     esac
 done

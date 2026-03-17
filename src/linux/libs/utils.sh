@@ -4,6 +4,7 @@ ROJO='\033[0;31m'
 VERDE='\033[0;32m'
 AMARILLO='\033[1;33m'
 AZUL='\033[0;34m'
+CIAN='\033[0;36m'
 RESET='\033[0m'
 
 LOG_FILE="../../logs/linux_services.log"
@@ -74,9 +75,18 @@ generar_menu() {
 }
 
 obtener_ip_local() {
-    local iface="enp0s8"
-    local ip=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    echo "$ip"
+    # 1er Intento: Preguntamos a la tabla de ruteo cuál es la interfaz que sale a internet (default gateway)
+    local iface=$(ip route | grep default | awk '{print $5}' | head -n 1)
+    
+    # 2do Intento (Fallback): Si es una red aislada sin gateway, tomamos la primera interfaz que esté "UP" (encendida) que no sea localhost (lo)
+    if [ -z "$iface" ]; then
+        iface=$(ip -br link | grep UP | grep -v "lo" | awk '{print $1}' | head -n 1)
+    fi
+    
+    # Si encontramos una interfaz válida, extraemos su IP con Regex
+    if [ -n "$iface" ]; then
+        ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1
+    fi
 }
 
 capturar_ip() {
