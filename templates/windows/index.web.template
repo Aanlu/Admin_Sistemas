@@ -3,62 +3,139 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard de Aprovisionamiento | @@MOTOR@@</title>
+    <title>@@MOTOR@@ — reprobados.com</title>
     <style>
-        :root {
-            --bg-color: #0f172a;
-            --card-bg: #1e293b;
-            --accent-color: #38bdf8;
-            --text-primary: #f8fafc;
-            --success-color: #22c55e;
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
-        body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background-color: var(--bg-color); 
-            color: var(--text-primary); 
-            display: flex; justify-content: center; align-items: center; 
-            height: 100vh; margin: 0; 
+        .card {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            border: 1px solid #00d4ff33;
+            border-radius: 16px;
+            padding: 48px 56px;
+            max-width: 560px;
+            width: 90%;
+            box-shadow: 0 0 60px #00d4ff22, 0 24px 48px #00000088;
+            text-align: center;
         }
-        .container { 
-            background-color: var(--card-bg); 
-            padding: 2.5rem; border-radius: 1rem; 
-            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
-            border: 1px solid rgba(255,255,255,0.1);
-            max-width: 500px; width: 90%; text-align: center;
+        .badge {
+            display: inline-block;
+            background: #00d4ff22;
+            border: 1px solid #00d4ff55;
+            color: #00d4ff;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            padding: 6px 16px;
+            border-radius: 20px;
+            margin-bottom: 24px;
         }
-        .status-badge {
-            background-color: rgba(34, 197, 94, 0.2);
-            color: var(--success-color);
-            padding: 0.5rem 1rem; border-radius: 9999px;
-            font-size: 0.875rem; font-weight: bold; display: inline-block;
-            margin-bottom: 1rem; border: 1px solid var(--success-color);
+        h1 {
+            font-size: 3rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #00d4ff, #0099ff, #00ffcc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+            letter-spacing: -1px;
         }
-        h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: var(--accent-color); }
-        .data-grid { text-align: left; background: rgba(0,0,0,0.2); padding: 1.5rem; border-radius: 0.5rem; }
-        .data-row { display: flex; justify-content: space-between; margin-bottom: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem; }
-        .label { color: #94a3b8; font-size: 0.9rem; }
-        .value { font-family: 'Courier New', Courier, monospace; color: var(--text-primary); font-weight: bold; }
-        footer { margin-top: 2rem; font-size: 0.75rem; color: #64748b; }
+        .domain {
+            color: #ffffff88;
+            font-size: 1rem;
+            margin-bottom: 32px;
+            letter-spacing: 1px;
+        }
+        .info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        .info-box {
+            background: #ffffff08;
+            border: 1px solid #ffffff11;
+            border-radius: 10px;
+            padding: 16px;
+        }
+        .info-box .label {
+            font-size: 10px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: #ffffff44;
+            margin-bottom: 6px;
+        }
+        .info-box .value {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #00d4ff;
+            font-family: 'Courier New', monospace;
+        }
+        .ssl-badge {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            background: #00ff8822;
+            border: 1px solid #00ff8844;
+            border-radius: 8px;
+            padding: 12px 20px;
+            color: #00ff88;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .dot {
+            width: 8px; height: 8px;
+            background: #00ff88;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.3); }
+        }
+        .os-badge {
+            margin-top: 16px;
+            font-size: 11px;
+            color: #ffffff33;
+            letter-spacing: 1px;
+        }
+        .footer {
+            margin-top: 12px;
+            font-size: 11px;
+            color: #ffffff22;
+            letter-spacing: 1px;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="status-badge">● SERVICIO ACTIVO</div>
-        <h1>Servidor Web Desplegado</h1>
-        <div class="data-grid">
-            <div class="data-row">
-                <span class="label">Motor HTTP:</span>
-                <span class="value">@@MOTOR@@</span>
+    <div class="card">
+        <div class="badge">Práctica 7 — SSL/TLS</div>
+        <h1>@@MOTOR@@</h1>
+        <div class="domain">reprobados.com</div>
+        <div class="info-grid">
+            <div class="info-box">
+                <div class="label">Versión</div>
+                <div class="value">@@VERSION@@</div>
             </div>
-            <div class="data-row">
-                <span class="label">Versión:</span>
-                <span class="value">@@VERSION@@</span>
-            </div>
-            <div class="data-row">
-                <span class="label">Puerto TCP:</span>
-                <span class="value" id="puerto-display">@@PUERTO@@</span>
+            <div class="info-box">
+                <div class="label">Puerto</div>
+                <div class="value" id="puerto-display">@@PUERTO@@</div>
             </div>
         </div>
+        <div class="ssl-badge">
+            <div class="dot"></div>
+            Conexión cifrada con TLS — HSTS activo
+        </div>
+        <div class="os-badge">Windows Server</div>
+        <div class="footer">Universidad • Administración de Sistemas • 2026</div>
     </div>
 </body>
 </html>

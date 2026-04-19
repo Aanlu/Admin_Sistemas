@@ -1,0 +1,13 @@
+<Connector port="@@PUERTO_HTTP@@" protocol="HTTP/1.1"
+               connectionTimeout="20000"
+               redirectPort="@@PUERTO_SSL@@" 
+               server="Tomcat" />
+
+    <Connector port="@@PUERTO_SSL@@" protocol="org.apache.coyote.http11.Http11NioProtocol"
+               maxThreads="150" SSLEnabled="true">
+        <SSLHostConfig hostName="_default_">
+            <Certificate certificateFile="@@CERT_PATH@@"
+                         certificateKeyFile="@@KEY_PATH@@"
+                         type="RSA" />
+        </SSLHostConfig>
+    </Connector>

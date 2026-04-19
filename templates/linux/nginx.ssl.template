@@ -1,0 +1,34 @@
+server {
+    listen @@PUERTO_SSL@@ ssl default_server;
+    listen [::]:@@PUERTO_SSL@@ ssl default_server;
+    server_name @@DOMINIO@@ www.@@DOMINIO@@;
+    root /var/www/nginx;
+    index index.html;
+
+    ssl_certificate     @@CERT_PATH@@;
+    ssl_certificate_key @@KEY_PATH@@;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header X-Content-Type-Options nosniff always;
+    server_tokens off;
+
+    location / {
+        try_files $uri $uri/ =404;
+        limit_except GET POST { deny all; }
+    }
+}
+
+server {
+    listen @@PUERTO_HTTP@@ default_server;
+    listen [::]:@@PUERTO_HTTP@@ default_server;
+    server_name @@DOMINIO@@ www.@@DOMINIO@@;
+    
+    # Redirección dinámica (HSTS forzado)
+    if ($host = @@DOMINIO@@) {
+        return 301 https://$host:@@PUERTO_SSL@@$request_uri;
+    }
+    return 404;
+}

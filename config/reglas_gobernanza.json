@@ -1,0 +1,25 @@
+﻿{
+    "GruposDefinidos": [
+        {
+            "NombreDepartamento": "Cuates",
+            "RutaOU": "OU=Cuates",
+            "LimiteCuotaMB": 10,
+            "HorarioPermitido": {
+                "HoraInicio": 8,
+                "HoraFin": 15
+            }
+        },
+        {
+            "NombreDepartamento": "No Cuates",
+            "RutaOU": "OU=No Cuates",
+            "LimiteCuotaMB": 5,
+            "HorarioPermitido": {
+                "HoraInicio": 15,
+                "HoraFin": 2
+            }
+        }
+    ],
+    "AdministradoresSupremos": [
+        "luis"
+    ]
+}

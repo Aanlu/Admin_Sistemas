@@ -1,471 +1,542 @@
 #!/bin/bash
 # ============================================================
-# ssl_funciones.sh — SSL/TLS para P7 (Linux)
-# Maneja: Apache2, Nginx, Tomcat, vsftpd
-# Dependencias: openssl, utils.sh
+# ssl_funciones.sh — PKI, SSL/TLS y auditoría final
+# Llamado por: 07_ssl.sh (via source)
+# Funciones exportadas:
+#   activar_ssl_apache2, activar_ssl_nginx, activar_ssl_tomcat
+#   activar_ftps_vsftpd, resumen_ssl_linux
 # ============================================================
 
-# Dominio configurable — puede sobreescribirse antes de sourcing
-DOMINIO_SSL="${DOMINIO_SSL:-reprobados.com}"
-DIR_SSL="/etc/ssl/admin_sistemas"
+PKI_DIR="/etc/ssl/admin_sistemas"
 
-# ------------------------------------------------------------
-# generar_cert_autofirmado <dominio>
-# Idempotente: no regenera si el cert es válido y no expira en <24h
-# ------------------------------------------------------------
-generar_cert_autofirmado() {
+# ============================================================
+# INTERNA: Genera certificado autofirmado RSA-2048
+# Retorna 0=OK, 1=fallo — el error BURBUJEA al orquestador
+# ============================================================
+_generar_cert_autofirmado() {
     local dominio="$1"
-    local crt="$DIR_SSL/$dominio.crt"
-    local key="$DIR_SSL/$dominio.key"
+    local cert_path="$2"
+    local key_path="$3"
 
-    mkdir -p "$DIR_SSL"
+    mkdir -p "$PKI_DIR"
+    # CORRECCIÓN: 750 permite que servicios del grupo (tomcat, www-data)
+    # puedan traversar el directorio sin exponer las claves a otros usuarios
+    chmod 750 "$PKI_DIR"
+    chown root:ssl-cert "$PKI_DIR" 2>/dev/null || chmod 755 "$PKI_DIR"
 
-    # Idempotencia: verificar si ya existe y sigue siendo válido (>1 día de vida)
-    if [ -f "$crt" ] && [ -f "$key" ]; then
-        if openssl x509 -in "$crt" -noout -checkend 86400 >/dev/null 2>&1; then
-            log_info "Certificado para $dominio ya existe y es válido."
-            return 0
-        else
-            log_warning "Certificado para $dominio expirado. Regenerando..."
-        fi
-    fi
+    echo -e "${CIAN}[PKI] Generando certificado X.509 autofirmado para: $dominio${RESET}"
 
-    log_info "Generando certificado autofirmado para $dominio..."
-
-    # SAN (Subject Alternative Names) para que coincida con el dominio
-    # y sea compatible con verificaciones modernas
-    local san_conf
-    san_conf=$(mktemp)
-    cat > "$san_conf" <<EOF
-[req]
-default_bits       = 2048
-prompt             = no
-default_md         = sha256
-distinguished_name = dn
-x509_extensions    = v3_req
-
-[dn]
-C  = MX
-ST = Sinaloa
-L  = Culiacan
-O  = Admin_Sistemas
-CN = $dominio
-
-[v3_req]
-subjectAltName = DNS:$dominio, DNS:www.$dominio, DNS:ftp.$dominio, DNS:*.${dominio}
-keyUsage       = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-EOF
-
-    openssl req -x509 -nodes -days 365 \
+    # -nodes     → sin passphrase (Apache/Nginx/Tomcat arrancan solos)
+    # -subj      → evita el prompt interactivo (crítico dentro del loader)
+    # CN=*.$dom  → wildcard cubre www.$dominio y subdominios
+    if ! openssl req -x509 -nodes -days 365 \
         -newkey rsa:2048 \
-        -keyout "$key" \
-        -out "$crt" \
-        -config "$san_conf" \
-        >> "$LOG_FILE" 2>&1
+        -keyout "$key_path" \
+        -out    "$cert_path" \
+        -subj   "/C=MX/ST=Sinaloa/L=Culiacan/O=Universidad/OU=Redes/CN=*.$dominio" \
+        >> "$LOG_FILE" 2>&1; then
 
-    rm -f "$san_conf"
-
-    if [ -f "$crt" ] && [ -f "$key" ]; then
-        chmod 600 "$key"
-        chmod 644 "$crt"
-        log_ok "Certificado generado: $crt"
-        log_ok "  CN: $dominio | Válido: 365 días | SAN: www.$dominio, ftp.$dominio"
-        return 0
-    else
-        log_error "Error al generar el certificado SSL."
+        log_error "[PKI] openssl falló al generar el certificado. Revise $LOG_FILE"
         return 1
     fi
+
+    chmod 600 "$key_path"
+    chmod 644 "$cert_path"
+    log_ok "[PKI] Cert: $cert_path"
+    log_ok "[PKI] Key:  $key_path"
+    return 0
 }
 
-# ------------------------------------------------------------
-# activar_ssl_apache2 <dominio> [puerto_http]
-# Configura HTTPS en el puerto 443 con redirección HTTP→HTTPS
-# ------------------------------------------------------------
+# ============================================================
+# INTERNA: Resuelve la ruta base del proyecto
+# Desde libs/ sube 3 niveles → admin_sistemas/
+# ============================================================
+_ruta_template() {
+    local nombre_template="$1"
+    local base
+    base="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    echo "${base}/templates/linux/${nombre_template}"
+}
+
+# ============================================================
+# SSL APACHE2
+# Parámetros: dominio  puerto_http  puerto_ssl
+# ============================================================
 activar_ssl_apache2() {
     local dominio="$1"
     local puerto_http="${2:-80}"
-    local puerto_ssl="${3:-443}" # Parámetro dinámico para evitar colisiones
+    local puerto_ssl="${3:-443}"
 
-    local crt="$DIR_SSL/$dominio.crt"
-    local key="$DIR_SSL/$dominio.key"
+    echo -e "\n${AMARILLO}=== SSL/TLS → APACHE2 | $dominio | HTTP:$puerto_http HTTPS:$puerto_ssl ===${RESET}"
 
+    # 1. Verificar que apache2 esté instalado
     if ! dpkg -s apache2 >/dev/null 2>&1; then
-        log_error "Apache2 no está instalado."
+        log_error "Apache2 no está instalado. Instálelo primero."
         return 1
     fi
 
-    generar_cert_autofirmado "$dominio" || return 1
+    local cert_path="$PKI_DIR/apache2_${dominio}.crt"
+    local key_path="$PKI_DIR/apache2_${dominio}.key"
 
-    # Permisos para www-data
-    chown root:www-data "$key"
-    chmod 640 "$key"
+    # 2. Generar certificado — si falla, abortamos (NO falso positivo)
+    _generar_cert_autofirmado "$dominio" "$cert_path" "$key_path" || return 1
 
-    a2enmod ssl rewrite headers >> "$LOG_FILE" 2>&1
+    # 3. Activar módulos requeridos
+    echo -e "${CIAN}[*] Activando módulos: ssl, rewrite, headers...${RESET}"
+    a2enmod ssl     >> "$LOG_FILE" 2>&1
+    a2enmod rewrite >> "$LOG_FILE" 2>&1
+    a2enmod headers >> "$LOG_FILE" 2>&1
 
-    # SNAPSHOT: Respaldo de seguridad (Idempotente)
-    local conf_default="/etc/apache2/sites-available/000-default.conf"
-    if [ -f "$conf_default" ] && [ ! -f "${conf_default}.bak_admin" ]; then
-        cp "$conf_default" "${conf_default}.bak_admin"
-        log_info "Snapshot de seguridad HTTP creado para Apache2."
+        if ! grep -q "^ServerName" /etc/apache2/apache2.conf 2>/dev/null; then
+        echo "ServerName $dominio" >> /etc/apache2/apache2.conf
     fi
 
-    # Agregar Listen dinámico
-    if ! grep -q "^Listen $puerto_ssl" /etc/apache2/ports.conf; then
+# Añadir puerto SSL en ports.conf SOLO si no existe ya
+    if ! grep -qE "^Listen\s+${puerto_ssl}(\s|$)" /etc/apache2/ports.conf 2>/dev/null; then
         echo "Listen $puerto_ssl" >> /etc/apache2/ports.conf
     fi
 
-    # Crear VirtualHost SSL
-    cat > /etc/apache2/sites-available/001-ssl.conf <<EOF
-# P7 — SSL VirtualHost generado automáticamente
-<VirtualHost *:$puerto_ssl>
-    ServerName $dominio
-    ServerAlias www.$dominio
+    # 5. Crear VirtualHost SSL (desde plantilla o inline)
+    local vhost_file="/etc/apache2/sites-available/ssl_${dominio}.conf"
+    local template
+    template=$(_ruta_template "apache.ssl.template")
+
+    if [ -f "$template" ]; then
+        cp "$template" "$vhost_file"
+        # Usar inyector seguro si está disponible (utils.sh), si no sed directo
+        if declare -f _inyectar_template >/dev/null 2>&1; then
+            _inyectar_template "$vhost_file" "@@DOMINIO@@"     "$dominio"
+            _inyectar_template "$vhost_file" "@@PUERTO_SSL@@"  "$puerto_ssl"
+            _inyectar_template "$vhost_file" "@@PUERTO_HTTP@@" "$puerto_http"
+            _inyectar_template "$vhost_file" "@@CERT_PATH@@"   "$cert_path"
+            _inyectar_template "$vhost_file" "@@KEY_PATH@@"    "$key_path"
+        else
+            sed -i "s|@@DOMINIO@@|$dominio|g"         "$vhost_file"
+            sed -i "s|@@PUERTO_SSL@@|$puerto_ssl|g"   "$vhost_file"
+            sed -i "s|@@PUERTO_HTTP@@|$puerto_http|g" "$vhost_file"
+            sed -i "s|@@CERT_PATH@@|$cert_path|g"     "$vhost_file"
+            sed -i "s|@@KEY_PATH@@|$key_path|g"       "$vhost_file"
+        fi
+    else
+        # Fallback inline — plantilla no encontrada
+        cat > "$vhost_file" <<EOF
+<VirtualHost *:${puerto_ssl}>
+    ServerName ${dominio}
+    ServerAlias www.${dominio}
     DocumentRoot /var/www/apache2
-
     SSLEngine on
-    SSLCertificateFile    $crt
-    SSLCertificateKeyFile $key
-
-    # HSTS básico (1 año)
+    SSLCertificateFile    ${cert_path}
+    SSLCertificateKeyFile ${key_path}
     Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
-    Header always set X-Frame-Options SAMEORIGIN
-    Header always set X-Content-Type-Options nosniff
-
     <Directory /var/www/apache2>
         Options -Indexes -FollowSymLinks
         AllowOverride None
         Require all granted
     </Directory>
 </VirtualHost>
-
-# Redirección HTTP → HTTPS usando el puerto SSL dinámico
-<VirtualHost *:$puerto_http>
-    ServerName $dominio
-    ServerAlias www.$dominio
+<VirtualHost *:${puerto_http}>
+    ServerName ${dominio}
+    ServerAlias www.${dominio}
     RewriteEngine On
-    RewriteRule ^(.*)$ https://$dominio:$puerto_ssl\$1 [R=301,L]
+    RewriteRule ^(.*)$ https://${dominio}:${puerto_ssl}\$1 [R=301,L]
 </VirtualHost>
 EOF
+    fi
 
-    a2ensite 001-ssl >> "$LOG_FILE" 2>&1
-    ufw allow "$puerto_ssl"/tcp >/dev/null 2>&1
+    # 6. Activar sitio SSL y desactivar default HTTP
+    a2ensite "ssl_${dominio}" >> "$LOG_FILE" 2>&1
+    a2dissite 000-default     >> "$LOG_FILE" 2>&1
 
-    if apache2ctl configtest >> "$LOG_FILE" 2>&1; then
-        systemctl restart apache2 >> "$LOG_FILE" 2>&1
-    else
-        log_error "Error en la configuración de Apache2. Revise $LOG_FILE"
+    # 7. Validar config ANTES de reiniciar (evita apagar Apache con config rota)
+    if ! apache2ctl configtest >> "$LOG_FILE" 2>&1; then
+        log_error "Configuración Apache inválida. No se reinició. Revise $LOG_FILE"
         return 1
     fi
 
-    if systemctl is-active --quiet apache2; then
-        log_ok "Apache2 SSL activo → https://$dominio:$puerto_ssl"
-        return 0
-    else
-        log_error "Apache2 no pudo reiniciar con SSL."
-        return 1
-    fi
+    systemctl restart apache2 >> "$LOG_FILE" 2>&1
+    ufw allow "$puerto_ssl"/tcp >> "$LOG_FILE" 2>&1
+
+    log_ok "Apache2 SSL activo → https://${dominio}:${puerto_ssl}"
+    return 0
 }
 
-# ------------------------------------------------------------
-# activar_ssl_nginx <dominio> [puerto_http]
-# ------------------------------------------------------------
+# ============================================================
+# SSL NGINX
+# Parámetros: dominio  puerto_http  puerto_ssl
+# ============================================================
 activar_ssl_nginx() {
     local dominio="$1"
-    local puerto_http="${2:-80}"
-    local puerto_ssl="${3:-443}"
+    local puerto_http="${2:-81}"
+    local puerto_ssl="${3:-444}"
 
-    local crt="$DIR_SSL/$dominio.crt"
-    local key="$DIR_SSL/$dominio.key"
+    echo -e "\n${AMARILLO}=== SSL/TLS → NGINX | $dominio | HTTP:$puerto_http HTTPS:$puerto_ssl ===${RESET}"
 
     if ! dpkg -s nginx >/dev/null 2>&1; then
-        log_error "Nginx no está instalado."
+        log_error "Nginx no está instalado. Instálelo primero."
         return 1
     fi
 
-    generar_cert_autofirmado "$dominio" || return 1
+    local cert_path="$PKI_DIR/nginx_${dominio}.crt"
+    local key_path="$PKI_DIR/nginx_${dominio}.key"
 
-    chown root:www-data "$key"
-    chmod 640 "$key"
+    _generar_cert_autofirmado "$dominio" "$cert_path" "$key_path" || return 1
 
-    local conf_nginx="/etc/nginx/sites-available/default"
-    
-    # SNAPSHOT: Respaldo de seguridad (Idempotente)
-    if [ -f "$conf_nginx" ] && [ ! -f "${conf_nginx}.bak_admin" ]; then
-        cp "$conf_nginx" "${conf_nginx}.bak_admin"
-        log_info "Snapshot de seguridad HTTP creado para Nginx."
-    fi
+    local nginx_conf="/etc/nginx/sites-available/ssl_${dominio}"
+    local template
+    template=$(_ruta_template "nginx.ssl.template")
 
-    cat > "$conf_nginx" <<EOF
-# P7 — Nginx SSL generado automáticamente
+    if [ -f "$template" ]; then
+        cp "$template" "$nginx_conf"
+        if declare -f _inyectar_template >/dev/null 2>&1; then
+            _inyectar_template "$nginx_conf" "@@DOMINIO@@"     "$dominio"
+            _inyectar_template "$nginx_conf" "@@PUERTO_SSL@@"  "$puerto_ssl"
+            _inyectar_template "$nginx_conf" "@@PUERTO_HTTP@@" "$puerto_http"
+            _inyectar_template "$nginx_conf" "@@CERT_PATH@@"   "$cert_path"
+            _inyectar_template "$nginx_conf" "@@KEY_PATH@@"    "$key_path"
+        else
+            sed -i "s|@@DOMINIO@@|$dominio|g"         "$nginx_conf"
+            sed -i "s|@@PUERTO_SSL@@|$puerto_ssl|g"   "$nginx_conf"
+            sed -i "s|@@PUERTO_HTTP@@|$puerto_http|g" "$nginx_conf"
+            sed -i "s|@@CERT_PATH@@|$cert_path|g"     "$nginx_conf"
+            sed -i "s|@@KEY_PATH@@|$key_path|g"       "$nginx_conf"
+        fi
+    else
+        cat > "$nginx_conf" <<EOF
 server {
-    listen $puerto_ssl ssl default_server;
-    listen [::]:$puerto_ssl ssl default_server;
-
-    server_name $dominio www.$dominio;
+    listen ${puerto_ssl} ssl default_server;
+    listen [::]:${puerto_ssl} ssl default_server;
+    server_name ${dominio} www.${dominio};
     root /var/www/nginx;
     index index.html;
-
-    ssl_certificate     $crt;
-    ssl_certificate_key $key;
+    ssl_certificate     ${cert_path};
+    ssl_certificate_key ${key_path};
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
-
-    # HSTS básico
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Frame-Options SAMEORIGIN always;
-    add_header X-Content-Type-Options nosniff always;
-
-    server_tokens off;
-
-    location / {
-        try_files \$uri \$uri/ =404;
-        limit_except GET POST { deny all; }
-    }
 }
-
-# Redirección HTTP → HTTPS
 server {
-    listen $puerto_http default_server;
-    listen [::]:$puerto_http default_server;
-    server_name $dominio www.$dominio;
-    
-    # Redirige usando el puerto SSL dinámico si no es 443
-    if (\$host = $dominio) {
-        return 301 https://\$host:$puerto_ssl\$request_uri;
-    }
-    return 404;
+    listen ${puerto_http} default_server;
+    listen [::]:${puerto_http} default_server;
+    server_name ${dominio} www.${dominio};
+    return 301 https://\$host:${puerto_ssl}\$request_uri;
 }
 EOF
+    fi
 
-    ufw allow "$puerto_ssl"/tcp >/dev/null 2>&1
+    # Deshabilitar default y activar el nuestro
+    rm -f /etc/nginx/sites-enabled/default
+    ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/ssl_${dominio}"
 
-    if nginx -t >> "$LOG_FILE" 2>&1; then
-        systemctl restart nginx >> "$LOG_FILE" 2>&1
-    else
-        log_error "Error en configuración de Nginx. Revise $LOG_FILE"
+    # Validar antes de reiniciar
+    if ! nginx -t >> "$LOG_FILE" 2>&1; then
+        log_error "Configuración Nginx inválida. No se reinició. Revise $LOG_FILE"
         return 1
     fi
 
-    if systemctl is-active --quiet nginx; then
-        log_ok "Nginx SSL activo → https://$dominio:$puerto_ssl"
-        return 0
-    else
-        log_error "Nginx no pudo reiniciar con SSL."
-        return 1
-    fi
+    systemctl restart nginx >> "$LOG_FILE" 2>&1
+    ufw allow "$puerto_ssl"/tcp >> "$LOG_FILE" 2>&1
+
+    log_ok "Nginx SSL activo → https://${dominio}:${puerto_ssl}"
+    return 0
 }
 
-# ------------------------------------------------------------
-# activar_ssl_tomcat <dominio>
-# Usa el Connector NIO2 con PEM directamente (sin keytool/JKS)
-# ------------------------------------------------------------
+# ============================================================
+# SSL TOMCAT (PKCS12 + conector NIO en server.xml)
+# Parámetros: dominio  [puerto_ssl=8443]
+# El puerto HTTP lo lee del server.xml existente
+# ============================================================
 activar_ssl_tomcat() {
     local dominio="$1"
+    local puerto_ssl="${2:-8443}"
 
-    local crt="$DIR_SSL/$dominio.crt"
-    local key="$DIR_SSL/$dominio.key"
+    echo -e "\n${AMARILLO}=== SSL/TLS → TOMCAT | $dominio | HTTPS:$puerto_ssl ===${RESET}"
 
     if [ ! -d /opt/tomcat ]; then
-        log_error "Tomcat no está instalado en /opt/tomcat."
+        log_error "Tomcat no está instalado en /opt/tomcat"
         return 1
     fi
 
-    generar_cert_autofirmado "$dominio" || return 1
+    local cert_pem="$PKI_DIR/tomcat_${dominio}.crt"
+    local key_pem="$PKI_DIR/tomcat_${dominio}.key"
+    local p12_path="$PKI_DIR/tomcat_${dominio}.p12"
+    local p12_pass="tomcat_ssl_p7"
 
-    # Tomcat lee el key como el usuario tomcat
-    chown root:tomcat "$key"
-    chmod 640 "$key"
-    chown root:tomcat "$crt"
-    chmod 644 "$crt"
+    # 1. Generar PEM
+    _generar_cert_autofirmado "$dominio" "$cert_pem" "$key_pem" || return 1
 
+    # 2. Convertir PEM → PKCS12 (formato nativo del conector NIO)
+    echo -e "${CIAN}[*] Convirtiendo PEM → PKCS12 para conector NIO...${RESET}"
+    if ! openssl pkcs12 -export \
+        -in      "$cert_pem" \
+        -inkey   "$key_pem" \
+        -out     "$p12_path" \
+        -name    "tomcat_ssl" \
+        -passout "pass:$p12_pass" \
+        >> "$LOG_FILE" 2>&1; then
+        log_error "Fallo al generar PKCS12. Revise $LOG_FILE"
+        return 1
+    fi
+    chown tomcat:tomcat "$p12_path"
+    chmod 640 "$p12_path"
+    # CORRECCIÓN: asegurar que tomcat puede entrar al directorio PKI
+    chown root:tomcat "$PKI_DIR" 2>/dev/null || true
+    chmod 750 "$PKI_DIR"
+
+    # 3. Leer puerto HTTP actual del server.xml
     local server_xml="/opt/tomcat/conf/server.xml"
+    local puerto_http_actual
+    puerto_http_actual=$(grep -oP 'Connector port="\K[0-9]+' "$server_xml" 2>/dev/null \
+        | grep -v "^8005$" | head -1)
+    [ -z "$puerto_http_actual" ] && puerto_http_actual=8080
 
-    # Idempotencia: solo agregar si el conector 8443 no existe
-    if grep -q 'port="8443"' "$server_xml"; then
-        log_info "Conector SSL (8443) ya existe en server.xml. Actualizando cert paths..."
-        sed -i "s|certificateFile=\"[^\"]*\"|certificateFile=\"$crt\"|g" "$server_xml"
-        sed -i "s|certificateKeyFile=\"[^\"]*\"|certificateKeyFile=\"$key\"|g" "$server_xml"
-    else
-        # Insertar el Connector HTTPS justo antes del cierre de </Service>
-        sed -i "/<\/Service>/i\\
-\\
-    <!-- P7 — Conector HTTPS/SSL generado automáticamente -->\\
-    <Connector port=\"8443\" protocol=\"org.apache.coyote.http11.Http11NioProtocol\"\\
-               maxThreads=\"150\" SSLEnabled=\"true\">\\
-        <SSLHostConfig hostName=\"_default_\">\\
-            <Certificate certificateFile=\"$crt\"\\
-                         certificateKeyFile=\"$key\"\\
-                         type=\"RSA\" />\\
-        </SSLHostConfig>\\
-    </Connector>" "$server_xml"
+    # 4. Inyectar conector SSL en server.xml
+    # Verificamos si ya existe un conector SSL para no duplicarlo
+    if grep -q "SSLEnabled=\"true\"" "$server_xml" 2>/dev/null; then
+        log_warning "Ya existe un conector SSL en server.xml. Reemplazando..."
+        # Eliminar conector SSL anterior
+        python3 - "$server_xml" <<'PYEOF' 2>/dev/null
+import sys, re
+with open(sys.argv[1], 'r') as f:
+    content = f.read()
+content = re.sub(
+    r'<Connector[^>]+SSLEnabled="true".*?</Connector>',
+    '', content, flags=re.DOTALL
+)
+with open(sys.argv[1], 'w') as f:
+    f.write(content)
+PYEOF
     fi
 
-    ufw allow 8443/tcp >/dev/null 2>&1
+    # Insertar el nuevo conector SSL justo después del conector HTTP
+    local template
+    template=$(_ruta_template "server.xml.template")
+
+    if [ -f "$template" ]; then
+        # Leer el fragmento de conectores desde la plantilla y sustituir variables
+        local fragmento
+        fragmento=$(cat "$template")
+        fragmento="${fragmento//@@PUERTO_HTTP@@/$puerto_http_actual}"
+        fragmento="${fragmento//@@PUERTO_SSL@@/$puerto_ssl}"
+        fragmento="${fragmento//@@CERT_PATH@@/$p12_path}"
+        fragmento="${fragmento//@@KEY_PATH@@/$p12_pass}"
+
+        # Reemplazar el conector HTTP existente con el par HTTP+SSL del template
+        python3 - "$server_xml" "$puerto_http_actual" "$fragmento" <<'PYEOF' 2>/dev/null
+import sys, re
+
+server_xml = sys.argv[1]
+puerto_http = sys.argv[2]
+fragmento   = sys.argv[3]
+
+with open(server_xml, 'r') as f:
+    content = f.read()
+
+# Eliminar el conector HTTP original
+content = re.sub(
+    r'<Connector\s+port="' + puerto_http + r'"[^/]*/?>',
+    '',
+    content
+)
+
+# Inyectar el par de conectores antes del cierre </Service>
+content = content.replace('</Service>', fragmento + '\n</Service>', 1)
+
+with open(server_xml, 'w') as f:
+    f.write(content)
+PYEOF
+    else
+        # Fallback inline — sin plantilla
+        python3 - "$server_xml" "$puerto_http_actual" "$puerto_ssl" "$p12_path" "$p12_pass" <<'PYEOF' 2>/dev/null
+import sys, re
+
+server_xml    = sys.argv[1]
+puerto_http   = sys.argv[2]
+puerto_ssl    = sys.argv[3]
+p12_path      = sys.argv[4]
+p12_pass      = sys.argv[5]
+
+with open(server_xml, 'r') as f:
+    content = f.read()
+
+# Eliminar conector HTTP original
+content = re.sub(
+    r'<Connector\s+port="' + puerto_http + r'"[^/]*/?>',
+    '',
+    content
+)
+
+nuevo = f"""
+    <Connector port="{puerto_http}" protocol="HTTP/1.1"
+               connectionTimeout="20000" redirectPort="{puerto_ssl}"
+               server="Tomcat" />
+    <Connector port="{puerto_ssl}"
+               protocol="org.apache.coyote.http11.Http11NioProtocol"
+               maxThreads="150" SSLEnabled="true" server="Tomcat">
+        <SSLHostConfig>
+            <Certificate certificateKeystoreFile="{p12_path}"
+                         certificateKeystorePassword="{p12_pass}"
+                         certificateKeystoreType="PKCS12"
+                         type="RSA" />
+        </SSLHostConfig>
+    </Connector>"""
+
+content = content.replace('</Service>', nuevo + '\n</Service>', 1)
+
+with open(server_xml, 'w') as f:
+    f.write(content)
+PYEOF
+    fi
+
+    ufw allow "$puerto_ssl"/tcp >> "$LOG_FILE" 2>&1
     systemctl restart tomcat >> "$LOG_FILE" 2>&1
 
-    # Polling de arranque (Tomcat tarda)
-    local contador=0
-    while [ $contador -lt 15 ]; do
-        sleep 2; ((contador++))
-        if ss -tln | grep -qE ":8443\s"; then
-            log_ok "Tomcat SSL activo → https://$dominio:8443"
-            return 0
-        fi
-    done
-
-    log_error "Tomcat no enlazó el puerto 8443 en el tiempo esperado."
-    log_error "Revise: journalctl -xeu tomcat | tail -20"
-    return 1
+    log_ok "Tomcat SSL activo → https://${dominio}:${puerto_ssl}"
+    return 0
 }
 
-# ------------------------------------------------------------
-# activar_ftps_vsftpd <dominio>
-# Activa SSL/TLS explícito en vsftpd (FTPS sobre puerto 21)
-# ------------------------------------------------------------
+# ============================================================
+# FTPS en vsftpd
+# Parámetros: dominio
+# ============================================================
 activar_ftps_vsftpd() {
     local dominio="$1"
 
-    local crt="$DIR_SSL/$dominio.crt"
-    local key="$DIR_SSL/$dominio.key"
+    echo -e "\n${AMARILLO}=== FTPS → VSFTPD | $dominio ===${RESET}"
 
     if ! dpkg -s vsftpd >/dev/null 2>&1; then
         log_error "vsftpd no está instalado."
         return 1
     fi
 
-    generar_cert_autofirmado "$dominio" || return 1
+    local cert_path="$PKI_DIR/vsftpd_${dominio}.crt"
+    local key_path="$PKI_DIR/vsftpd_${dominio}.key"
 
-    # vsftpd corre como root para leer el key
-    chmod 600 "$key"
-    chmod 644 "$crt"
+    _generar_cert_autofirmado "$dominio" "$cert_path" "$key_path" || return 1
 
     local conf="/etc/vsftpd.conf"
 
-    # Función auxiliar de edición idempotente
+    # Actualizar o agregar directivas SSL de forma idempotente
     _vsftpd_set() {
-        local param="$1" valor="$2"
-        if grep -q "^${param}=" "$conf"; then
-            sed -i "s|^${param}=.*|${param}=${valor}|" "$conf"
-        elif grep -q "^#${param}=" "$conf"; then
-            sed -i "s|^#${param}=.*|${param}=${valor}|" "$conf"
+        local clave="$1" valor="$2"
+        if grep -q "^${clave}=" "$conf" 2>/dev/null; then
+            sed -i "s|^${clave}=.*|${clave}=${valor}|" "$conf"
+        elif grep -q "^#${clave}=" "$conf" 2>/dev/null; then
+            sed -i "s|^#${clave}=.*|${clave}=${valor}|" "$conf"
         else
-            echo "${param}=${valor}" >> "$conf"
+            echo "${clave}=${valor}" >> "$conf"
         fi
     }
 
-    _vsftpd_set "ssl_enable"             "YES"
-    _vsftpd_set "allow_anon_ssl"         "NO"
-    _vsftpd_set "force_local_data_ssl"   "YES"
-    _vsftpd_set "force_local_logins_ssl" "YES"
-    _vsftpd_set "ssl_tlsv1_2"           "YES"
-    _vsftpd_set "ssl_sslv2"             "NO"
-    _vsftpd_set "ssl_sslv3"             "NO"
-    _vsftpd_set "require_ssl_reuse"     "NO"
-    _vsftpd_set "ssl_ciphers"           "HIGH"
-    _vsftpd_set "rsa_cert_file"         "$crt"
-    _vsftpd_set "rsa_private_key_file"  "$key"
+    _vsftpd_set "ssl_enable"              "YES"
+    _vsftpd_set "allow_anon_ssl"          "NO"
+    _vsftpd_set "force_local_data_ssl"    "YES"
+    _vsftpd_set "force_local_logins_ssl"  "YES"
+    _vsftpd_set "ssl_tlsv1"               "YES"
+    _vsftpd_set "ssl_sslv2"               "NO"
+    _vsftpd_set "ssl_sslv3"               "NO"
+    _vsftpd_set "require_ssl_reuse"       "NO"
+    _vsftpd_set "ssl_ciphers"             "HIGH"
+    _vsftpd_set "rsa_cert_file"           "$cert_path"
+    _vsftpd_set "rsa_private_key_file"    "$key_path"
 
     systemctl restart vsftpd >> "$LOG_FILE" 2>&1
 
     if systemctl is-active --quiet vsftpd; then
-        log_ok "FTPS activo → ftps://$dominio:21 (SSL explícito)"
+        log_ok "FTPS activado en vsftpd. Conectar con FTPES (TLS Explícito) al puerto 21."
         return 0
     else
-        log_error "vsftpd no pudo reiniciar con FTPS."
-        log_error "Revise: journalctl -xeu vsftpd"
+        log_error "vsftpd no arrancó tras activar FTPS. Revise $LOG_FILE"
         return 1
     fi
 }
 
-# ------------------------------------------------------------
-# verificar_ssl_servicio <nombre> <host:puerto> [starttls_proto]
-# Retorna CN del cert si OK, "ERROR" si falla
-# ------------------------------------------------------------
-verificar_ssl_servicio() {
-    local nombre="$1"
-    local host_puerto="$2"
-    local starttls="${3:-}"  # ej. "ftp" para FTPS
-
-    local cmd_opts="-connect $host_puerto -servername ${host_puerto%%:*}"
-    [ -n "$starttls" ] && cmd_opts="$cmd_opts -starttls $starttls"
-
-    local cn
-    cn=$(echo "" | timeout 5 openssl s_client $cmd_opts 2>/dev/null \
-        | openssl x509 -noout -subject 2>/dev/null \
-        | grep -oP 'CN\s*=\s*\K[^,/]+' | head -1 | xargs)
-
-    local expiry
-    expiry=$(echo "" | timeout 5 openssl s_client $cmd_opts 2>/dev/null \
-        | openssl x509 -noout -enddate 2>/dev/null \
-        | sed 's/notAfter=//')
-
-    if [ -n "$cn" ]; then
-        printf "${VERDE}[OK]${RESET}    %-12s → %-30s CN=%-25s Expira: %s\n" \
-            "$nombre" "$host_puerto" "$cn" "$expiry"
-        return 0
-    else
-        printf "${ROJO}[ERROR]${RESET} %-12s → %-30s SSL no responde o no configurado\n" \
-            "$nombre" "$host_puerto"
-        return 1
-    fi
-}
-
-# ------------------------------------------------------------
-# resumen_ssl_linux
-# Prueba todos los servicios SSL/TLS en el sistema Linux
-# ------------------------------------------------------------
+# ============================================================
+# AUDITORÍA FINAL: resumen_ssl_linux
+# Lee estado.conf y verifica los puertos SSL con openssl s_client
+# ============================================================
 resumen_ssl_linux() {
     clear
-    echo -e "${AMARILLO}=====================================================${RESET}"
-    echo -e "${AMARILLO}       RESUMEN SSL/TLS — SERVIDORES LINUX            ${RESET}"
-    echo -e "${AMARILLO}=====================================================${RESET}"
+    echo -e "${CIAN}=================================================${RESET}"
+    echo -e "${AMARILLO}     RESUMEN SSL/TLS — INFRAESTRUCTURA P7        ${RESET}"
+    echo -e "${CIAN}=================================================${RESET}\n"
+
+    local dominio
+    dominio=$(leer_estado "DOMINIO_SSL" 2>/dev/null)
+    [ -z "$dominio" ] && dominio="${DOMINIO_SSL:-reprobados.com}"
+
+    echo -e "${AZUL}Dominio PKI base: ${VERDE}$dominio${RESET}\n"
+
+    printf "${AMARILLO}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
+        "MOTOR" "P.HTTP" "P.SSL" "ACTIVO" "ESTADO CERTIFICADO"
+    echo "-------------------------------------------------------------------"
+
+    local motores=("APACHE2" "NGINX" "TOMCAT")
+
+    for motor in "${motores[@]}"; do
+        local p_http p_ssl ssl_activo estado_cert color
+
+        p_http=$(leer_estado "PUERTO_HTTP_${motor}" 2>/dev/null)
+        p_ssl=$(leer_estado "PUERTO_SSL_${motor}"   2>/dev/null)
+        ssl_activo=$(leer_estado "SSL_ACTIVO_${motor}" 2>/dev/null)
+
+        [ -z "$p_http" ]    && p_http="--"
+        [ -z "$p_ssl" ]     && p_ssl="--"
+        [ -z "$ssl_activo" ] && ssl_activo="--"
+
+        if [ "$ssl_activo" == "SI" ] && [ "$p_ssl" != "--" ]; then
+            # Verificación real con openssl s_client (timeout 3s)
+            local resultado
+            resultado=$(echo "Q" | timeout 3s openssl s_client \
+                -connect "127.0.0.1:${p_ssl}" \
+                -servername "$dominio" 2>&1)
+
+            if echo "$resultado" | grep -q "CONNECTED"; then
+                local fecha_exp
+                fecha_exp=$(echo "$resultado" \
+                    | grep "notAfter" | awk -F= '{print $2}')
+                estado_cert="✔ VÁLIDO (exp: $fecha_exp)"
+                color="$VERDE"
+            else
+                estado_cert="✖ NO RESPONDE (puerto $p_ssl)"
+                color="$ROJO"
+            fi
+        elif [ "$ssl_activo" == "ERROR" ]; then
+            estado_cert="⚠ FALLÓ AL CONFIGURAR"
+            color="$ROJO"
+        elif [ "$ssl_activo" == "NO" ]; then
+            estado_cert="— Sin SSL (solo HTTP)"
+            color="$AMARILLO"
+        else
+            estado_cert="— No configurado"
+            color="$RESET"
+        fi
+
+        printf "${color}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
+            "$motor" "$p_http" "$p_ssl" "$ssl_activo" "$estado_cert"
+    done
+
+    # FTPS
     echo ""
-    printf "${AMARILLO}%-8s %-12s %-30s %-26s %s${RESET}\n" \
-        "ESTADO" "SERVICIO" "ENDPOINT" "CN DEL CERTIFICADO" "EXPIRACIÓN"
-    echo "-----------------------------------------------------------------------"
-
-    local errores=0
-
-    # Apache2 HTTPS
-    if dpkg -s apache2 >/dev/null 2>&1 && systemctl is-active --quiet apache2; then
-        verificar_ssl_servicio "Apache2" "localhost:443" || ((errores++))
+    printf "${AMARILLO}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
+        "VSFTPD" "21" "21(TLS)" "--" "ESTADO FTPS"
+    echo "-------------------------------------------------------------------"
+    if grep -q "^ssl_enable=YES" /etc/vsftpd.conf 2>/dev/null; then
+        printf "${VERDE}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
+            "VSFTPD" "21" "21" "SI" "✔ FTPS (TLS Explícito) ACTIVO"
     else
-        printf "${AMARILLO}[SKIP]${RESET}  %-12s → No instalado o inactivo\n" "Apache2"
+        printf "${AMARILLO}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
+            "VSFTPD" "21" "--" "NO" "— SSL no activado en vsftpd"
     fi
 
-    # Nginx HTTPS
-    if dpkg -s nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
-        verificar_ssl_servicio "Nginx" "localhost:443" || ((errores++))
+    echo -e "\n${AZUL}Certificados en $PKI_DIR:${RESET}"
+    if [ -d "$PKI_DIR" ]; then
+        ls -1 "$PKI_DIR" 2>/dev/null | while read -r f; do
+            echo "  $f"
+        done
     else
-        printf "${AMARILLO}[SKIP]${RESET}  %-12s → No instalado o inactivo\n" "Nginx"
-    fi
-
-    # Tomcat HTTPS
-    if [ -d /opt/tomcat ] && systemctl is-active --quiet tomcat; then
-        verificar_ssl_servicio "Tomcat" "localhost:8443" || ((errores++))
-    else
-        printf "${AMARILLO}[SKIP]${RESET}  %-12s → No instalado o inactivo\n" "Tomcat"
-    fi
-
-    # vsftpd FTPS (STARTTLS)
-    if dpkg -s vsftpd >/dev/null 2>&1 && systemctl is-active --quiet vsftpd; then
-        verificar_ssl_servicio "vsftpd" "localhost:21" "ftp" || ((errores++))
-    else
-        printf "${AMARILLO}[SKIP]${RESET}  %-12s → No instalado o inactivo\n" "vsftpd"
+        echo "  (directorio vacío — ningún certificado generado aún)"
     fi
 
     echo ""
-    echo "-----------------------------------------------------------------------"
-    if [ $errores -eq 0 ]; then
-        log_ok "Todos los servicios activos responden con SSL/TLS."
-    else
-        log_warning "$errores servicio(s) no responden correctamente por SSL."
-    fi
-
-    echo ""
-    echo -e "${AZUL}Certificados en $DIR_SSL:${RESET}"
-    ls -la "$DIR_SSL"/*.crt 2>/dev/null | awk '{print "  "$NF}' || echo "  Ninguno generado aún."
-
     pausa
 }

@@ -1,0 +1,29 @@
+# P7 — SSL VirtualHost generado automáticamente por plantilla
+<VirtualHost *:@@PUERTO_SSL@@>
+    ServerName @@DOMINIO@@
+    ServerAlias www.@@DOMINIO@@
+    DocumentRoot /var/www/apache2
+
+    SSLEngine on
+    SSLCertificateFile    @@CERT_PATH@@
+    SSLCertificateKeyFile @@KEY_PATH@@
+
+    # HSTS básico (1 año)
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    Header always set X-Frame-Options SAMEORIGIN
+    Header always set X-Content-Type-Options nosniff
+
+    <Directory /var/www/apache2>
+        Options -Indexes -FollowSymLinks
+        AllowOverride None
+        Require all granted
+    </Directory>
+</VirtualHost>
+
+# Redirección dinámica HTTP → HTTPS
+<VirtualHost *:@@PUERTO_HTTP@@>
+    ServerName @@DOMINIO@@
+    ServerAlias www.@@DOMINIO@@
+    RewriteEngine On
+    RewriteRule ^(.*)$ https://@@DOMINIO@@:@@PUERTO_SSL@@$1 [R=301,L]
+</VirtualHost>

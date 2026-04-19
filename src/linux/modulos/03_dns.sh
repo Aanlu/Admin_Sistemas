@@ -3,6 +3,8 @@
 source libs/utils.sh
 source libs/validaciones.sh
 
+DNS_IP_SERVIDOR=""
+
 # Variables Globales
 TEMPLATE_ZONA="../../templates/linux/db.zona.templates"
 CONF_LOCAL="/etc/bind/named.conf.local"
@@ -61,6 +63,12 @@ verificar_ip_fija() {
     else
         log_info "Manteniendo configuración de red actual."
     fi
+
+    # Guardar IP de la interfaz seleccionada para crear_zona()
+    DNS_IP_SERVIDOR=$(ip -4 addr show "$iface" 2>/dev/null \
+        | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+    [ -n "$DNS_IP_SERVIDOR" ] && \
+        log_info "IP del servidor DNS guardada: $DNS_IP_SERVIDOR (interfaz $iface)"
     pausa
 }
 
@@ -116,25 +124,38 @@ forzar_resolucion_local() {
         return 1
     fi
 
-    local interface=$(ip -o addr show | grep "$dns_ip" | awk '{print $2}' | head -n 1)
+    local interface
+    interface=$(ip -o addr show | grep "$dns_ip" | awk '{print $2}' | head -n 1)
 
     if [[ -z "$interface" ]]; then
-        log_warning "No se pudo mapear la IP $dns_ip a una interfaz física. Omitiendo bind estricto."
+        log_warning "No se pudo mapear $dns_ip a una interfaz. Omitiendo bind estricto."
     else
-        log_info "Asegurando enrutamiento DNS hacia BIND9 ($dns_ip) en la interfaz $interface..."
+        log_info "Enlazando BIND9 ($dns_ip) a la interfaz $interface..."
     fi
 
-    sed -i -E "s/^#?DNS=.*/DNS=$dns_ip/" /etc/systemd/resolved.conf
-    sed -i -E 's/^#?Domains=.*/Domains=~./' /etc/systemd/resolved.conf
-    sed -i -E 's/^#?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
-    
+    # CORRECCIÓN CRÍTICA: NO tocar DNSStubListener ni Domains globalmente.
+    # Solo configuramos el DNS de la interfaz específica de BIND9.
+    # Esto permite que 127.0.0.53 siga funcionando para resolución externa.
+
+    # 1. Limpiar configuración global dañina que dejaron versiones anteriores
+    sed -i -E 's/^DNS=.*/DNS=/'                   /etc/systemd/resolved.conf
+    sed -i -E 's/^Domains=.*/Domains=/'           /etc/systemd/resolved.conf
+    sed -i -E 's/^DNSStubListener=.*/DNSStubListener=yes/' /etc/systemd/resolved.conf
+
+    # 2. Reiniciar resolved para aplicar los cambios
     systemctl restart systemd-resolved
 
+    # 3. Asignar BIND9 solo a la interfaz donde vive (no globalmente)
     if [[ -n "$interface" ]]; then
         resolvectl dns "$interface" "$dns_ip" 2>/dev/null || true
+        # ~. hace que esa interfaz resuelva su dominio, pero NO secuestra el global
+        resolvectl domain "$interface" "~${dns_ip%.*}" 2>/dev/null || true
     fi
 
-# Manejo seguro de resolv.conf (Nunca destruir, siempre respaldar)
+    # 4. resolv.conf apunta al stub local — SIEMPRE, sin excepciones
+    # El stub redirige al DNS correcto según la interfaz automáticamente
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+
     if [ -L /etc/resolv.conf ] || [ -f /etc/resolv.conf ]; then
         if [ ! -f /etc/resolv.conf.bak_admin_sistemas ]; then
             mv /etc/resolv.conf /etc/resolv.conf.bak_admin_sistemas
@@ -142,13 +163,22 @@ forzar_resolucion_local() {
             rm -f /etc/resolv.conf
         fi
     fi
-    
+
     cat > /etc/resolv.conf <<EOF
-# Archivo generado estáticamente por el módulo DNS
-nameserver $dns_ip
+# Generado por módulo DNS — Admin Sistemas
+# Apunta al stub local de systemd-resolved.
+# BIND9 local ($dns_ip) está configurado por interfaz via resolvectl.
+nameserver 127.0.0.53
+options edns0 trust-ad
 EOF
 
-    log_ok "Resolución local blindada. BIND9 ($dns_ip) tiene el control absoluto."
+    # Proteger contra sobreescritura accidental
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+
+    log_ok "DNS configurado correctamente:"
+    log_ok "  → Stub local:    127.0.0.53 (systemd-resolved)"
+    log_ok "  → BIND9 local:   $dns_ip (interfaz: ${interface:-desconocida})"
+    log_ok "  → DNS externo:   via enp0s3 (NAT VirtualBox) sin interferencia"
 }
 
 crear_zona() {
@@ -178,7 +208,18 @@ crear_zona() {
         pausa; return
     fi
 
-    local ip_sugerida=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v "127.0.0.1" | head -n 1)
+    local ip_sugerida
+    if [ -n "$DNS_IP_SERVIDOR" ]; then
+        ip_sugerida="$DNS_IP_SERVIDOR"
+    else
+        # Fallback: excluir NAT de VirtualBox (10.0.2.x) y link-local (169.254.x.x)
+        ip_sugerida=$(ip -4 addr show \
+            | grep -oP '(?<=inet\s)\d+(\.\d+){3}' \
+            | grep -v "^127\." \
+            | grep -v "^10\.0\.2\." \
+            | grep -v "^169\.254\." \
+            | head -n 1)
+    fi
     local ip_server=$(capturar_ip "IP del Servidor para registros raíz y subdominios" "$ip_sugerida")
 
     cp "$TEMPLATE_ZONA" "$archivo_zona"

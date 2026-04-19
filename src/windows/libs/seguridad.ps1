@@ -1,4 +1,4 @@
-function Permitir-Ping-Global {
+﻿function Permitir-Ping-Global {
     Remove-NetFirewallRule -DisplayName "Regla-Global-ICMPv4" -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName "Regla-Global-ICMPv4" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Allow | Out-Null
 }

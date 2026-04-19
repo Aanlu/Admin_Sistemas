@@ -140,41 +140,41 @@ EOL
     
     if systemctl is-active --quiet isc-dhcp-server; then
         log_ok "Servicio Configurado y ACTIVO en $interface."
-        
-        # --- INICIO DEL BYPASS CORREGIDO ---
-        echo -e "${CIAN}Forzando resolución DNS local hacia $dns_primario (Bypass systemd-resolved)...${RESET}"
-        
-        # 1. Ajustamos las reglas globales de systemd-resolved con la IP y bloqueamos dominios externos
-        sed -i -E "s/^#?DNS=.*/DNS=$dns_primario/" /etc/systemd/resolved.conf
-        sed -i -E 's/^#?Domains=.*/Domains=~./' /etc/systemd/resolved.conf
-        sed -i -E 's/^#?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
-        
-        # 2. Reiniciamos el demonio para que asimile los cambios
+
+        echo -e "${CIAN}Configurando resolución DNS local hacia $dns_primario...${RESET}"
+
+        # CORRECCIÓN: igual que en DNS — no matar el stub global
+        sed -i -E 's/^DNS=.*/DNS=/'                           /etc/systemd/resolved.conf
+        sed -i -E 's/^Domains=.*/Domains=/'                   /etc/systemd/resolved.conf
+        sed -i -E 's/^DNSStubListener=.*/DNSStubListener=yes/' /etc/systemd/resolved.conf
+
         systemctl restart systemd-resolved
-        
-        # 3. Forzamos a la interfaz específica a usar este DNS (evita fugas hacia otras interfaces)
+
+        # Asignar DNS solo a la interfaz DHCP, no globalmente
         resolvectl dns "$interface" "$dns_primario" 2>/dev/null || true
-        
-        # 4. Manejo seguro de resolv.conf (Nunca destruir, siempre respaldar)
+
+        # resolv.conf siempre apunta al stub local
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+
         if [ -L /etc/resolv.conf ] || [ -f /etc/resolv.conf ]; then
-            # Hacemos backup solo si el backup no existe ya (idempotencia)
             if [ ! -f /etc/resolv.conf.bak_admin_sistemas ]; then
                 mv /etc/resolv.conf /etc/resolv.conf.bak_admin_sistemas
             else
-                rm -f /etc/resolv.conf # Si ya hay backup, podemos borrar el actual seguro
+                rm -f /etc/resolv.conf
             fi
         fi
-        
-        cat > /etc/resolv.conf <<EOF
-nameserver $dns_primario
-EOF
-        log_ok "El servidor ahora resolverá localmente a través de $dns_primario."
-        # --- FIN DEL BYPASS CORREGIDO ---
 
+        cat > /etc/resolv.conf <<EOF
+# Generado por módulo DHCP — Admin Sistemas
+nameserver 127.0.0.53
+options edns0 trust-ad
+EOF
+
+        chattr +i /etc/resolv.conf 2>/dev/null || true
+        log_ok "DNS configurado. Resolución local: $dns_primario | Externa: NAT intacto."
     else
         log_error "Fallo al iniciar el servicio DHCP. Ejecute: journalctl -xeu isc-dhcp-server.service"
     fi
-    pausa
 }
 
 alternar_servicio() {

@@ -4,8 +4,6 @@
 
 # =============================================================================
 # DESPLEGAR SERVIDOR HTTP
-# Fases: Motor -> Version -> Puerto -> Instalar -> Puerto -> Hardening -> HTML
-# Novedad: detecta instalacion previa del motor para ofrecer reutilizar puerto.
 # =============================================================================
 function Desplegar-ServidorHTTP {
     Clear-Host
@@ -24,7 +22,12 @@ function Desplegar-ServidorHTTP {
         Pausa; return
     }
 
-# ── FASE 1.5: Analisis de Estado (Upgrade/Downgrade) ──────────────────────
+    # FIX CRITICO: $version NUNCA se asignaba en el codigo original.
+    # Extraer-VersionesDinamicas devuelve "2.4.58 (Latest)" o "10.0 (LTS - Nativo)".
+    # Necesitamos solo el numero: "2.4.58"
+    $version = ($versiones[0] -split '\s+')[0]
+
+    # ── FASE 1.5: Analisis de Estado (Upgrade/Downgrade) ──────────────────────
     $infoActual = Obtener-InfoServidor -Motor $motor
     $saltarInstalacion = $false
 
@@ -35,9 +38,8 @@ function Desplegar-ServidorHTTP {
             $saltarInstalacion = $true
         }
     } else {
-        # Extraemos la version actual solo si son numeros puros (ej. 2.4.55)
         $vActStr = if ($infoActual -and $infoActual.Version -match '^[\d\.]+$') { $infoActual.Version } else { $null }
-        
+
         if ($vActStr) {
             try {
                 $vSel = [version]$version
@@ -57,15 +59,12 @@ function Desplegar-ServidorHTTP {
                     if (-not (Confirmar-Accion "Desea forzar la degradacion (Downgrade)?")) { return }
                 }
             } catch {
-                # Si falla el parseo matematico, ignoramos y seguimos flujo normal
+                # Si falla el parseo, ignoramos y seguimos flujo normal
             }
         }
     }
 
     # ── FASE 2: Puerto ────────────────────────────────────────────────────────
-    # Detectar si ya hay una instalacion previa del mismo motor corriendo.
-    # Si existe, ofrecer reutilizar su puerto actual para evitar que quede
-    # un proceso ocupando un puerto huerfano tras la reinstalacion.
     Clear-Host
     Write-Host "--- FASE 2: CONFIGURACION DE RED ---`n" -ForegroundColor Yellow
 
@@ -84,17 +83,12 @@ function Desplegar-ServidorHTTP {
         if ($selPort -eq $optsPort.Count) { return }
 
         if ($selPort -eq 0) {
-            # Reutilizar: el nuevo servidor tomara el mismo puerto que el anterior.
-            # Liberar-PuertoAnterior se encarga de matar el proceso que lo ocupa
-            # para que la nueva instancia pueda bindearlo sin conflicto.
             $puerto = $puertoAnterior
             Write-Host "  [*] Puerto $puerto conservado. Se liberara antes de la instalacion." `
                        -ForegroundColor Cyan
         }
-        # Si eligio "Diferente", $puerto sigue en 0 y cae al bucle de abajo.
     }
 
-    # Captura interactiva solo cuando no se reutilizo el puerto anterior
     if ($puerto -eq 0) {
         do {
             $puerto    = Capturar-Entero "Ingrese el puerto TCP de escucha deseado"
@@ -108,9 +102,6 @@ function Desplegar-ServidorHTTP {
     }
 
     # ── FASE 3: Liberacion del puerto anterior ────────────────────────────────
-    # OBLIGATORIO: si habia un motor previo (mismo u otro) ocupando ese puerto,
-    # hay que liberarlo antes de instalar para no recibir
-    # "bind: solo se permite un uso de cada direccion" al arrancar el nuevo.
     Write-Host "`n--- FASE 3: LIBERACION DE PUERTO ANTERIOR ---" -ForegroundColor Yellow
     Liberar-PuertoAnterior -Motor $motor -Puerto $puerto
     Log-Ok "Puerto $puerto liberado y listo para el nuevo servidor."
@@ -153,9 +144,6 @@ function Desplegar-ServidorHTTP {
 
 # =============================================================================
 # MODIFICAR PUERTO EN CALIENTE
-# Cambia el puerto de escucha de un servidor ya instalado SIN reinstalarlo.
-# Flujo: detectar motores instalados -> validar nuevo puerto -> reconfigurar ->
-#        actualizar el span id="puerto-display" en el index.html existente.
 # =============================================================================
 function Modificar-PuertoCaliente {
     Clear-Host
@@ -163,7 +151,6 @@ function Modificar-PuertoCaliente {
     Write-Host "         MODIFICACION DE PUERTO EN CALIENTE      " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Yellow
 
-    # Mostrar solo los motores que esten efectivamente instalados
     $instalados = @(Obtener-MotoresInstalados)
     if ($instalados.Count -eq 0) {
         Log-Error "No se detecto ningun servidor HTTP instalado en este sistema."
@@ -182,7 +169,6 @@ function Modificar-PuertoCaliente {
         Write-Host "No detectado (el servidor puede estar detenido)" -ForegroundColor Yellow
     }
 
-    # Capturar y validar el nuevo puerto
     $puertNuevo = 0
     $est        = -1
     do {
@@ -203,17 +189,13 @@ function Modificar-PuertoCaliente {
     Write-Host "`n  [*] Aplicando cambio de puerto: $puertoActual -> $puertNuevo..." `
                -ForegroundColor Cyan
 
-    # Reconfigurar el servicio con el nuevo puerto
     if (-not (Configurar-PuertoServicio -Motor $motor -Puerto $puertNuevo)) {
         Log-Error "No se pudo aplicar el nuevo puerto. Ver log: $($global:LOG_FILE)"
         Pausa; return
     }
 
-    # Actualizar el puerto visible en el index.html sin regenerar la pagina entera.
-    # Busca el span id="puerto-display" y reemplaza su contenido.
     Actualizar-PuertoEnHTML -Motor $motor -PuertoNuevo $puertNuevo
 
-    # Ajustar regla de firewall: borrar la antigua y crear la nueva
     Remove-NetFirewallRule -DisplayName "HTTP-$motor-$puertoActual" -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName "HTTP-$motor-$puertNuevo" `
         -Direction Inbound -LocalPort $puertNuevo -Protocol TCP `
@@ -226,9 +208,6 @@ function Modificar-PuertoCaliente {
 
 # =============================================================================
 # AUDITORIA DE SERVIDORES HTTP
-# Muestra un panel con todos los servidores HTTP detectados:
-#   Motor | Version | Puerto | Estado | URL de prueba
-# Incluye opcion para abrir el localhost directamente desde el menu.
 # =============================================================================
 function Auditoria-ServidoresHTTP {
     Clear-Host
@@ -237,7 +216,6 @@ function Auditoria-ServidoresHTTP {
     Write-Host "=================================================" -ForegroundColor Yellow
     Write-Host ""
 
-    # Recopilar estado de cada motor posible
     $registros = @()
     foreach ($m in @("iis", "apache", "nginx")) {
         $info = Obtener-InfoServidor -Motor $m
@@ -251,12 +229,7 @@ function Auditoria-ServidoresHTTP {
         Pausa; return
     }
 
-    # ── Tabla de estado ───────────────────────────────────────────────────────
-    $cMotor   = 10
-    $cVersion = 14
-    $cPuerto  = 8
-    $cEstado  = 12
-    $cURL     = 32
+    $cMotor   = 10; $cVersion = 14; $cPuerto  = 8; $cEstado  = 12; $cURL = 32
     $sep      = "-" * ($cMotor + $cVersion + $cPuerto + $cEstado + $cURL + 8)
 
     Write-Host ("  {0,-$cMotor} {1,-$cVersion} {2,-$cPuerto} {3,-$cEstado} {4,-$cURL}" -f `
@@ -278,7 +251,6 @@ function Auditoria-ServidoresHTTP {
     Write-Host "  $sep"
     Write-Host ""
 
-    # ── Datos de conexion ─────────────────────────────────────────────────────
     Write-Host "  DATOS DE CONEXION:" -ForegroundColor Yellow
     $ipLocal = Obtener-IP-Local
     if ($ipLocal) {
@@ -290,7 +262,6 @@ function Auditoria-ServidoresHTTP {
     }
     Write-Host ""
 
-    # ── Sub-menu de prueba ────────────────────────────────────────────────────
     $corriendo = @($registros | Where-Object { $_.Estado -eq "Corriendo" -and $_.Puerto -gt 0 })
 
     if ($corriendo.Count -eq 0) {
@@ -311,13 +282,6 @@ function Auditoria-ServidoresHTTP {
 
 # =============================================================================
 # RESETEAR / DESINSTALAR SERVIDOR HTTP
-# Desinstala completamente el motor elegido sin reiniciar la VM:
-#   - Detiene el servicio de Windows y mata procesos residuales
-#   - Desinstala via Chocolatey (Apache/Nginx) o deshabilita el rol (IIS)
-#   - Elimina el directorio de datos (htdocs / html / wwwroot)
-#   - Borra residuos en C:\ProgramData\chocolatey\lib\<paquete>
-#   - Limpia la clave del servicio en el Registro de Windows
-#   - Elimina las reglas de firewall creadas por este modulo
 # =============================================================================
 function Resetear-ServidorHTTP {
     Clear-Host
@@ -340,13 +304,10 @@ function Resetear-ServidorHTTP {
     if ($selMotor -eq $instalados.Count) { return }
     $motor = $instalados[$selMotor]
 
-    # Confirmacion explicita antes de una operacion destructiva
     if (-not (Confirmar-Accion "Eliminar completamente $($motor.ToUpper()) del sistema")) { return }
 
     Write-Host "`n  [*] Iniciando reset completo de $($motor.ToUpper())..." -ForegroundColor Cyan
 
-    # Toda la logica destructiva vive en http_funciones.ps1
-    # para mantener este archivo como capa de presentacion pura.
     $ok = Desinstalar-ServidorCompleto -Motor $motor
 
     if ($ok) {
@@ -363,7 +324,6 @@ function Resetear-ServidorHTTP {
 
 # =============================================================================
 # MENU HTTP PRINCIPAL
-# Punto de entrada del modulo. Llama a las 4 funciones principales.
 # =============================================================================
 function Menu-HTTP {
     $opts = @(

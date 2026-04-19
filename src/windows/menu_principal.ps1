@@ -7,53 +7,47 @@
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -Path $ScriptDir
 
-# ── RUTAS GLOBALES (calculadas UNA sola vez desde el punto de entrada) ────────
-# Equivalente exacto al patron de Linux:
-#   DIR_BASE=$(dirname "$(readlink -f "$0")")   <- eso es $ScriptDir (src\windows\)
-#   LOG_FILE="$DIR_BASE/../../logs/..."          <- subir 2 niveles = Admin_Sistemas\
-#
-# $ScriptDir = src\windows\
-# Split-Path -Parent $ScriptDir = src\
-# Split-Path -Parent (Split-Path -Parent $ScriptDir) = Admin_Sistemas\  ← REPO_ROOT
+# ── RUTAS GLOBALES ────────────────────────────────────────────────────────────
 $global:REPO_ROOT    = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 $global:LOG_FILE     = Join-Path $global:REPO_ROOT "logs\windows_services.log"
 $global:TEMPLATE_WIN = Join-Path $global:REPO_ROOT "templates\windows\index.web.template"
 
-# Garantizar que el directorio de logs exista (equivalente a: mkdir -p logs/)
+# Garantizar que el directorio de logs exista
 $logsDir = Split-Path -Parent $global:LOG_FILE
 if (-not (Test-Path $logsDir)) {
     New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 }
 
-# Mapa de versiones Apache Lounge (se rellena en Extraer-VersionesDinamicas)
 $global:APACHE_LOUNGE_MAP = [ordered]@{}
 
-# ── Librerias base ────────────────────────────────────────────────────────────
+# ── Librerias base (INYECCIÓN DE MEMORIA CORREGIDA) ───────────────────────────
 . .\libs\utils.ps1
 . .\libs\validaciones.ps1
 . .\libs\seguridad.ps1
-
-# ── Funciones auxiliares de modulos ──────────────────────────────────────────
-# http_funciones.ps1 se carga aqui porque cuando se hace dot-source desde aqui,
-# $PSScriptRoot dentro de las funciones apunta a src\windows\ (este directorio),
-# NO al directorio de libs\. Al usar $global:REPO_ROOT eliminamos esa dependencia.
 . .\libs\http_funciones.ps1
+. .\libs\ftp_cliente.ps1     # REQUERIDO PARA REPOSITORIO FTP
+. .\libs\ssl_funciones.ps1   # REQUERIDO PARA CIFRADO PKI
 
-# ── Modulos: se cargan UNA sola vez. El switch llama a la funcion, no al archivo.
+# ── Modulos (CARGA DE MÓDULOS COMPLETADA) ─────────────────────────────────────
 . .\modulos\01_diagnostico.ps1
 . .\modulos\02_dhcp.ps1
 . .\modulos\03_dns.ps1
 . .\modulos\04_ssh.ps1
 . .\modulos\05_ftp.ps1
 . .\modulos\06_http.ps1
+. .\modulos\07_ssl.ps1       # REQUERIDO PARA MENU-SSL
+. .\modulos\08_gobernanza.ps1
 
+# ── Interfaz de Usuario ───────────────────────────────────────────────────────
 $OpcionesPrincipales = @(
     "Diagnostico de Red",
     "Configuracion Servidor DHCP",
     "Configuracion Servidor DNS",
     "SSH",
     "FTP",
-    "HTTP"
+    "HTTP",
+    "SSL / Repositorio FTP",
+    "Gobernanza Zero-Trust (P8 / AD)"  # <--- AGREGA ESTA LÍNEA
 )
 
 while ($true) {
@@ -66,7 +60,9 @@ while ($true) {
         3 { Menu-SSH }
         4 { Menu-FTP }
         5 { Menu-HTTP }
-        6 {
+        6 { Menu-SSL }
+        7 { Menu-Gobernanza }  # <--- ENRUTA HACIA EL MÓDULO 08
+        8 {                    # <--- EL BOTÓN DE SALIR AHORA ES EL 8
             Clear-Host
             Write-Host "Cerrando sistema..." -ForegroundColor Green
             exit

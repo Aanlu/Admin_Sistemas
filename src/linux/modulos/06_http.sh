@@ -58,42 +58,14 @@ desplegar_servidor_http(){
     fi
     
     clear
-    echo -e "${AMARILLO}--- FASE 2: CONFIGURACIÓN DE RED ---${RESET}\n"
-    local puerto_seleccionado
-    
-    while true; do
-        puerto_seleccionado=$(capturar_entero "Ingrese el puerto TCP de escucha deseado")
-        echo -e "${AZUL}[*] Auditando disponibilidad del puerto $puerto_seleccionado...${RESET}"
-        
-        validar_puerto "$puerto_seleccionado"
-        local estado_puerto=$?
-
-        if [ $estado_puerto -eq 0 ]; then
-            log_ok "Puerto $puerto_seleccionado libre y validado."
-            break
-        elif [ $estado_puerto -eq 2 ]; then
-            log_error "El puerto $puerto_seleccionado esta reservado para infraestructura critica."
-            continue
-        else
-            log_error "El puerto YA ESTÁ EN USO en el Kernel. Elija otro."
-        fi
-    done
+    echo -e "${AMARILLO}--- FASE 2: CONFIGURACIÓN DE RED ---${RESET}\n"  
+    local puerto_seleccionado=$(capturar_puerto_inteligente "$motor_seleccionado")
 
     if [ $saltar_instalacion -eq 0 ]; then
         echo -e "\n${AMARILLO}--- FASE 3: APROVISIONAMIENTO Y DESPLIEGUE ---${RESET}"
         
-        systemctl stop "$motor_seleccionado" >> "$LOG_FILE" 2>&1
-        if [ "$motor_seleccionado" == "apache2" ]; then
-            apt-get purge -yq 'apache2*' 'libapr*' >> "$LOG_FILE" 2>&1
-            rm -rf /etc/apache2 /var/www/apache2 /var/www/html >> "$LOG_FILE" 2>&1
-        elif [ "$motor_seleccionado" == "nginx" ]; then
-            apt-get purge -yq 'nginx*' 'libnginx-mod*' >> "$LOG_FILE" 2>&1
-            rm -rf /etc/nginx /var/www/nginx /var/www/html >> "$LOG_FILE" 2>&1
-        elif [ "$motor_seleccionado" == "tomcat" ]; then
-            rm -rf /opt/tomcat >> "$LOG_FILE" 2>&1
-        fi
-        apt-get autoremove -yq --purge >> "$LOG_FILE" 2>&1
-        apt-get clean >> "$LOG_FILE" 2>&1
+# Invocamos nuestra nueva función centralizada pasándole el motor actual
+        purgar_motor_http "$motor_seleccionado"
 
         if instalador_paquetes "$motor_seleccionado" "$version_seleccionada"; then
             log_ok "Binarios instalados correctamente."
