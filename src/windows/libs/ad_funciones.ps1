@@ -52,6 +52,7 @@ function Sync-IdentidadesCSV {
     $domainName = $domainInfo.NetBIOSName
     $domainDN = $domainInfo.DistinguishedName
     $recursoCompartido = "\\$env:COMPUTERNAME\Perfiles_P8"
+    $recursoPerfiles = "\\$env:COMPUTERNAME\RoamingProfiles$"
 
     # 2. CREACIÓN DE ESTRUCTURA (OUs y Grupos)
     $ouBase = "OU=Gobernanza,$domainDN"
@@ -85,6 +86,7 @@ function Sync-IdentidadesCSV {
         $targetOU = "OU=$departamento,$ouBase"
         $nombreGrupoSeguridad = "Grupo_$departamento"
         $homeDirectory = "$recursoCompartido\$username"
+        $profilePath = "$recursoPerfiles\$username"
         
         $reglaAsignada = $reglasJSON.GruposDefinidos | Where-Object { $_.NombreDepartamento -eq $departamento }
         $adUser = Get-ADUser -Filter "SamAccountName -eq '$username'" -ErrorAction SilentlyContinue
@@ -106,26 +108,29 @@ function Sync-IdentidadesCSV {
             }
         }
 
-        # 4. APLICACIÓN DE HORARIOS Y PERFILES (Manejo del Administrador Supremo)
+# 4. APLICACIÓN DE HORARIOS Y PERFILES (Manejo del Administrador Supremo)
+        $scriptLogon = "redireccion_carpetas.bat"
+
         if ($reglasJSON.AdministradoresSupremos -contains $username) {
             Write-Host "      [*] $username es ADMIN SUPREMO. Acceso 24/7 sin restricciones." -ForegroundColor Magenta
             try {
                 Set-ADUser -Identity $username -Title $departamento -Department $departamento `
-                           -HomeDrive "H:" -HomeDirectory $homeDirectory -Clear LogonHours -ErrorAction Stop
+                           -HomeDrive "H:" -HomeDirectory $homeDirectory `
+                           -ProfilePath $profilePath -ScriptPath $scriptLogon -Clear LogonHours -ErrorAction Stop
             } catch {}
         } else {
             if ($reglaAsignada) {
-                # Forzamos que la variable reciba un arreglo de bytes puro
                 [byte[]]$horasBytes = Convertir-HorarioABytesUTC -horaInicioLocal $reglaAsignada.HorarioPermitido.HoraInicio -horaFinLocal $reglaAsignada.HorarioPermitido.HoraFin
                 
-                # Actualizamos perfil base
-                Set-ADUser -Identity $username -Title $departamento -Department $departamento -HomeDrive "H:" -HomeDirectory $homeDirectory -ErrorAction SilentlyContinue
+                # Inyección de perfil móvil y script de redirección
+                Set-ADUser -Identity $username -Title $departamento -Department $departamento `
+                           -HomeDrive "H:" -HomeDirectory $homeDirectory `
+                           -ProfilePath $profilePath -ScriptPath $scriptLogon -ErrorAction SilentlyContinue
                 
-                # Limpiamos e inyectamos la matriz de bytes pura (SIN silenciador)
                 Set-ADUser -Identity $username -Clear logonhours -ErrorAction SilentlyContinue
                 Set-ADUser -Identity $username -Replace @{logonhours = $horasBytes} -ErrorAction Stop
                 
-                Write-Host "      -> Horario UTC inyectado correctamente." -ForegroundColor DarkGray
+                Write-Host "      -> Horario UTC, Perfil Móvil y Redirección inyectados correctamente." -ForegroundColor DarkGray
             }
         }
 

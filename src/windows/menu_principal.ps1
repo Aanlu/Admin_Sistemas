@@ -37,6 +37,7 @@ $global:APACHE_LOUNGE_MAP = [ordered]@{}
 . .\modulos\06_http.ps1
 . .\modulos\07_ssl.ps1       # REQUERIDO PARA MENU-SSL
 . .\modulos\08_gobernanza.ps1
+. .\modulos\09_seguridad_rbac.ps1 # REQUERIDO PARA MENU-GOBERNANZA
 
 # ── Interfaz de Usuario ───────────────────────────────────────────────────────
 $OpcionesPrincipales = @(
@@ -47,7 +48,8 @@ $OpcionesPrincipales = @(
     "FTP",
     "HTTP",
     "SSL / Repositorio FTP",
-    "Gobernanza Zero-Trust (P8 / AD)"  # <--- AGREGA ESTA LÍNEA
+    "Gobernanza Zero-Trust (P8 / AD)",  # <--- AGREGA ESTA LÍNEA
+    "Seguridad RBAC y MFA (P9)"           # <--- AGREGA ESTA LÍNEA
 )
 
 while ($true) {
@@ -62,7 +64,8 @@ while ($true) {
         5 { Menu-HTTP }
         6 { Menu-SSL }
         7 { Menu-Gobernanza }  # <--- ENRUTA HACIA EL MÓDULO 08
-        8 {                    # <--- EL BOTÓN DE SALIR AHORA ES EL 8
+        8 { Menu-P09 }         # <--- ENRUTA HACIA EL MÓDULO 09
+        9 {                    # <--- EL BOTÓN DE SALIR AHORA ES EL 8
             Clear-Host
             Write-Host "Cerrando sistema..." -ForegroundColor Green
             exit

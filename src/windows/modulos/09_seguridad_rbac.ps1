@@ -1,0 +1,151 @@
+# ==============================================================================
+# MODULO 09: Seguridad de Identidad, Delegacion RBAC y MFA
+# ==============================================================================
+. "$PSScriptRoot\..\libs\seguridad.ps1"
+
+function Menu-GestionUsuariosP09 {
+    $opcs = @("Mostrar Token MFA de un usuario", "Restablecer Contrasena de AD", "Crear Usuario Nuevo", "Eliminar Usuario")
+
+    while ($true) {
+        $sel = Generar-Menu -Titulo "PANEL DE GESTION DE IDENTIDADES (MFA/AD)" -Opciones $opcs -TextoSalir "Volver al Menu 09"
+        Clear-Host
+
+        switch ($sel) {
+            0 { 
+                $u = Seleccionar-UsuarioAD -Titulo "SELECCIONE USUARIO PARA EXTRAER TOKEN"
+                if ($u) { Mostrar-TokenUsuario -Usuario $u }
+                Pausa 
+            }
+            1 {
+                $u = Seleccionar-UsuarioAD -Titulo "SELECCIONE USUARIO A RESTABLECER"
+                if ($u) {
+                    $p = Read-Host "Nueva Contrasena" -AsSecureString
+                    try { Set-ADAccountPassword -Identity $u -NewPassword $p -Reset -ErrorAction Stop; Log-Ok "Exito." } catch { Log-Error $_.Exception.Message }
+                }
+                Pausa
+            }
+            2 {
+                $u = Read-Host "Nombre del nuevo usuario"
+                $p = Read-Host "Contrasena" -AsSecureString
+                $opcTipo = @("Administrador", "Cuate", "No Cuate", "Individual/Externo")
+                $selTipo = Generar-Menu -Titulo "SELECCIONE EL TIPO DE PERFIL/MFA" -Opciones $opcTipo -TextoSalir "Cancelar"
+                if ($selTipo -lt 4) {
+                    $tipo = switch($selTipo) { 0 {"Admin"}; 1 {"Cuate"}; 2 {"NoCuate"}; 3 {"Individual"} }
+                    try {
+                        New-ADUser -Name $u -SamAccountName $u -AccountPassword $p -Enabled $true -ErrorAction Stop
+                        $key = Configurar-UsuarioMFA -Usuario $u -Semilla (-join ((1..16) | ForEach-Object { "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"[(Get-Random -Maximum 32)] }))
+                        Log-Ok "Usuario creado. Llave: $key"
+                    } catch { Log-Error $_.Exception.Message }
+                }
+                Pausa
+            }
+            3 {
+                $u = Seleccionar-UsuarioAD -Titulo "SELECCIONE USUARIO A ELIMINAR"
+                if ($u) {
+                    try {
+                        Remove-ADUser -Identity $u -Confirm:$false -ErrorAction Stop
+                        & "C:\Program Files\multiOTP\multiotp.exe" -delete $u 2>&1 | Out-Null
+                        Log-Ok "Eliminado."
+                    } catch { Log-Error $_.Exception.Message }
+                }
+                Pausa
+            }
+            4 { return }
+        }
+    }
+}
+
+function Menu-EvaluacionP09 {
+    $opcEval = @(
+        "Test 1: Comandos para Delegacion (RBAC)",
+        "Test 2: Comandos para Directiva de Contrasena (FGPP)",
+        "Test 3: Instrucciones para Flujo MFA",
+        "Test 4: Comandos para Bloqueo de Cuenta",
+        "Test 5: Ejecutar Reporte de Auditoria"
+    )
+
+    # Preguntamos las contraseñas una sola vez para inyectarlas en los comandos
+    Clear-Host
+    Write-Host "--- CONFIGURACION DEL TELEPROMPTER ---" -ForegroundColor Cyan
+    $pAdmins = Read-Host "Ingrese la contrasena actual de los Administradores"
+    $pUsers  = Read-Host "Ingrese la contrasena actual de los Usuarios"
+    $pNueva  = Read-Host "Ingrese una contraseña de prueba temporal (Ej. Hacker123!)"
+
+    while ($true) {
+        $sel = Generar-Menu -Titulo "TELEPROMPTER DE DEMOSTRACION (Copia y Pega)" -Opciones $opcEval -TextoSalir "Volver al Menu 09"
+        Clear-Host
+        
+        switch ($sel) {
+            0 { 
+                Write-Host "`n=== TEST 1: CONTROL DE ACCESO BASADO EN ROLES ===" -ForegroundColor Yellow
+                Write-Host "Dile al profesor: 'Voy a intentar cambiar la clave de usuario_cuate con admin_storage (que NO tiene permisos)'" -ForegroundColor DarkGray
+                Write-Host "`nCopia y pega este bloque en tu consola SSH:`n" -ForegroundColor White
+                Write-Host "`$cred = New-Object System.Management.Automation.PSCredential (`"gobernanza\admin_storage`", (ConvertTo-SecureString `"$pAdmins`" -AsPlainText -Force))" -ForegroundColor Cyan
+                Write-Host "Set-ADAccountPassword -Identity `"usuario_cuate`" -NewPassword (ConvertTo-SecureString `"$pNueva`" -AsPlainText -Force) -Credential `$cred -Reset" -ForegroundColor Cyan
+                Write-Host "`n(El sistema te escupira un error rojo de Acceso Denegado. Demostracion exitosa)." -ForegroundColor Green
+                Pausa 
+            }
+            1 { 
+                Write-Host "`n=== TEST 2: DIRECTIVA FGPP (12 Caracteres) ===" -ForegroundColor Yellow
+                Write-Host "Dile al profesor: 'Voy a intentar ponerle una contrasena de 8 caracteres al admin_identidad'" -ForegroundColor DarkGray
+                Write-Host "`nCopia y pega este comando en tu consola SSH:`n" -ForegroundColor White
+                Write-Host "Set-ADAccountPassword -Identity `"admin_identidad`" -NewPassword (ConvertTo-SecureString `"Corta12!`" -AsPlainText -Force) -Reset" -ForegroundColor Cyan
+                Write-Host "`n(El sistema lo rechazara por longitud/complejidad. Demostracion exitosa)." -ForegroundColor Green
+                Pausa 
+            }
+            2 { 
+                Write-Host "`n=== TEST 3: FLUJO MFA (INTERCEPCION SSH) ===" -ForegroundColor Yellow
+                Write-Host "El Test 3 es completamente visual. Haz lo siguiente frente al profesor:" -ForegroundColor White
+                Write-Host "1. Abre una nueva ventana de terminal." -ForegroundColor Cyan
+                Write-Host "2. Escribe: ssh usuario_cuate@IP_DE_TU_SERVIDOR" -ForegroundColor Cyan
+                Write-Host "3. Ingresa la contrasena: $pUsers" -ForegroundColor Cyan
+                Write-Host "4. El servidor te mostrara la pantalla azul del Gateway exigiendo el token." -ForegroundColor Cyan
+                Write-Host "5. Abre Google Authenticator en tu celular y pon el codigo de 6 digitos." -ForegroundColor Cyan
+                Pausa 
+            }
+            3 { 
+                Write-Host "`n=== TEST 4: BLOQUEO POR FUERZA BRUTA ===" -ForegroundColor Yellow
+                Write-Host "Dile al profesor: 'Voy a simular 4 intentos de inicio de sesion falsos para disparar el bloqueo'" -ForegroundColor DarkGray
+                Write-Host "`nCopia y pega este bloque completo en tu consola SSH:`n" -ForegroundColor White
+                Write-Host "Add-Type -AssemblyName System.DirectoryServices.AccountManagement" -ForegroundColor Cyan
+                Write-Host "`$ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext([System.DirectoryServices.AccountManagement.ContextType]::Domain)" -ForegroundColor Cyan
+                Write-Host "1..4 | ForEach-Object { `$ctx.ValidateCredentials(`"admin_identidad`", `"ClaveFalsa`$_`") }" -ForegroundColor Cyan
+                Write-Host "Get-ADUser -Identity `"admin_identidad`" -Properties LockedOut | Select-Object Name, LockedOut" -ForegroundColor Cyan
+                Write-Host "`n(Veras que LockedOut pasa a estar en True. Usa la opcion 4 del Menu 09 para desbloquearlo despues)." -ForegroundColor Green
+                Pausa 
+            }
+            4 { 
+                Log-Info "TEST 5: REPORTE AUDITORIA 4625"
+                $eventos = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4625} -MaxEvents 10 -ErrorAction SilentlyContinue
+                if ($eventos) {
+                    $ruta = "C:\Users\Administrador\Desktop\Reporte_Auditoria_4625.txt"
+                    $resultado = $eventos | Select-Object TimeCreated, Id, @{Name="Motivo"; Expression={$_.Message.Split("`n")[0]}}
+                    $resultado | Format-Table -AutoSize
+                    $eventos | Format-List | Out-File $ruta
+                    Log-Ok "Reporte generado en: $ruta"
+                } else {
+                    Log-Warning "No se encontraron eventos. Haz el Test 4 primero."
+                }
+                Pausa 
+            }
+            5 { return }
+        }
+    }
+}
+
+function Menu-P09 {
+    $opciones = @("1. Instalacion Completa (Infraestructura, Roles y Tokens)", "2. Gestion de Usuarios (Ver Tokens / Cambiar Claves)", "3. Submenu de Evaluacion (Teleprompter de Comandos)", "4. Desbloquear Usuarios AD (Lockout)")
+
+    while ($true) {
+        $op = Generar-Menu -Titulo "MODULO 09: SEGURIDAD, RBAC Y MFA" -Opciones $opciones -TextoSalir "Volver al Menu Principal"
+        Clear-Host
+
+        switch ($op) {
+            0 { Preparar-InfraestructuraP09; Crear-UsuariosRBAC; Configurar-FGPP-Roles; Aplicar-DelegacionControl; Pausa }
+            1 { Menu-GestionUsuariosP09 }
+            2 { Menu-EvaluacionP09 }
+            3 { Desbloquear-UsuariosAD; Pausa }
+            4 { return }
+        }
+    }
+}
