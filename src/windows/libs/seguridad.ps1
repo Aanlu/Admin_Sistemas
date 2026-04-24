@@ -4,26 +4,42 @@
 # ==============================================================================
 
 function Preparar-InfraestructuraP09 {
-    Log-Info "Fase 0: Preparando terreno (Directorios, Compartidos, OUs, SSH y Auditoria)..."
+    Log-Info "Fase 0: Preparando terreno..."
 
     $rutaLocal = "C:\Admin_Sistemas\RoamingProfiles"
     if (-not (Test-Path $rutaLocal)) { New-Item $rutaLocal -ItemType Directory -Force | Out-Null }
-    
-    try {
-        $acl = Get-Acl $rutaLocal
-        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("CREATOR OWNER", "FullControl", "ContainerInherit, ObjectInherit", "InheritOnly", "Allow")
-        $acl.AddAccessRule($rule)
-        Set-Acl $rutaLocal $acl
-    } catch {}
 
     if (-not (Get-SmbShare -Name "RoamingProfiles$" -ErrorAction SilentlyContinue)) {
-        New-SmbShare -Name "RoamingProfiles$" -Path $rutaLocal -FullAccess "Administradores" -ReadAccess "Todos" | Out-Null
+        New-SmbShare -Name "RoamingProfiles$" -Path $rutaLocal -FullAccess "Everyone" | Out-Null
+        Log-Ok "Share RoamingProfiles creado (Full para Everyone, NTFS restringe)."
     }
+
+    $acl = Get-Acl $rutaLocal
+    $acl.SetAccessRuleProtection($true, $false)
+
+    $sidSystem    = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    $sidAdmins    = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $sidCreator   = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::CreatorOwnerSid, $null)
+    $sidAuthUsers = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::AuthenticatedUserSid, $null)
+
+    $rFull    = [System.Security.AccessControl.FileSystemRights]::FullControl
+    $rProfile = [System.Security.AccessControl.FileSystemRights]"ReadAndExecute, AppendData, ReadPermissions"
+    $iAll     = [System.Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit"
+    $iNone    = [System.Security.AccessControl.InheritanceFlags]::None
+    $pNone    = [System.Security.AccessControl.PropagationFlags]::None
+    $pInhOnly = [System.Security.AccessControl.PropagationFlags]::InheritOnly
+    $aAllow   = [System.Security.AccessControl.AccessControlType]::Allow
+
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidSystem,    $rFull,    $iAll,  $pNone,    $aAllow)))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidAdmins,   $rFull,    $iAll,  $pNone,    $aAllow)))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidCreator,  $rFull,    $iAll,  $pInhOnly, $aAllow)))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidAuthUsers,$rProfile, $iNone, $pNone,    $aAllow)))
+    Set-Acl $rutaLocal $acl
+    Log-Ok "Permisos NTFS SID-safe aplicados."
 
     $dominio = (Get-ADDomain).DistinguishedName
     foreach ($ou in @("Cuates", "No Cuates")) {
-        $existeOU = Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -SearchBase $dominio -SearchScope OneLevel -ErrorAction SilentlyContinue
-        if (-not $existeOU) {
+        if (-not (Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -ErrorAction SilentlyContinue)) {
             New-ADOrganizationalUnit -Name $ou -Path $dominio -ProtectedFromAccidentalDeletion $false | Out-Null
         }
     }
@@ -32,86 +48,60 @@ function Preparar-InfraestructuraP09 {
         New-ADFineGrainedPasswordPolicy -Name "FGPP_Usuarios_8" -Precedence 20 -MinPasswordLength 8 -ComplexityEnabled $true
     }
 
-    auditpol /set /subcategory:"{0CCE9215-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable | Out-Null
+    auditpol /set /subcategory:"{0cce9215-69ae-11d9-bed3-505054503030}" /success:enable /failure:enable | Out-Null
+    auditpol /set /subcategory:"{0cce9216-69ae-11d9-bed3-505054503030}" /success:enable /failure:enable | Out-Null
+    Log-Ok "Auditoria Logon/Logoff activada."
 
-    $origenGateway = "C:\Users\Administrador\Admin_Sistemas\src\windows\Gateway-ZeroTrust.ps1"
-    $rutaGateway = "C:\Admin_Sistemas\Gateway-ZeroTrust.ps1"
-    if (Test-Path $origenGateway) { Copy-Item $origenGateway -Destination $rutaGateway -Force }
-
-    # ====================================================================
-    # NUEVO: Validacion, Descarga e Instalacion automatica de multiOTP
-    # ====================================================================
     $multiDir = "C:\Program Files\multiOTP"
     if (-not (Test-Path "$multiDir\multiotp.exe")) {
-        Log-Warning "multiOTP no detectado. Intentando instalar automaticamente..."
-       try {
+        Log-Warning "multiOTP no detectado. Descargando..."
+        try {
             if (-not (Test-Path $multiDir)) { New-Item -ItemType Directory -Path $multiDir -Force | Out-Null }
             $zipPath = "$env:TEMP\multiotp.zip"
             $tempExt = "$env:TEMP\multiotp_ext"
-            
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-WebRequest -Uri "https://download.multiotp.net/multiotp.zip" -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
-            
-            Log-Info "Extrayendo archivos de multiOTP..."
             if (Test-Path $tempExt) { Remove-Item $tempExt -Recurse -Force | Out-Null }
             Expand-Archive -Path $zipPath -DestinationPath $tempExt -Force
-            
-            # Buscar dónde quedó el .exe dentro del ZIP extraído
             $exe = Get-ChildItem -Path $tempExt -Filter "multiotp.exe" -Recurse | Select-Object -First 1
-            if ($exe) {
-                # Copiar solo el contenido del directorio del .exe hacia la raíz de C:\Program Files\multiOTP
-                Copy-Item -Path "$($exe.DirectoryName)\*" -Destination $multiDir -Recurse -Force
-                Log-Ok "multiOTP instalado correctamente en $multiDir"
-            } else {
-                Log-Error "No se encontro multiotp.exe dentro del archivo descargado."
-            }
-        } catch {
-            Log-Error "Fallo la descarga automatica (Sin internet o URL caida)."
-            Write-Host "`nACCION MANUAL REQUERIDA:" -ForegroundColor Red
-            Write-Host "1. Descargue 'multiotp.zip' en su maquina local desde https://multiotp.net/" -ForegroundColor Yellow
-            Write-Host "2. Transfiera el archivo al servidor." -ForegroundColor Yellow
-            Write-Host "3. Extraiga el contenido exactamente en: C:\Program Files\multiOTP\" -ForegroundColor Yellow
-            Write-Host "4. Asegurese de que exista el archivo: C:\Program Files\multiOTP\multiotp.exe`n" -ForegroundColor Yellow
-        }
+            if ($exe) { Copy-Item -Path "$($exe.DirectoryName)\*" -Destination $multiDir -Recurse -Force; Log-Ok "multiOTP instalado." }
+            else { Log-Error "multiotp.exe no encontrado en el ZIP." }
+        } catch { Log-Error "Fallo la descarga de multiOTP: $($_.Exception.Message)" }
     }
 
     if (Test-Path "$multiDir\multiotp.exe") {
-        try {
-            $aclM = Get-Acl $multiDir
-            $ruleM = New-Object System.Security.AccessControl.FileSystemAccessRule("Usuarios", "Modify", "ContainerInherit, ObjectInherit", "None", "Allow")
-            $aclM.AddAccessRule($ruleM)
-            Set-Acl $multiDir $aclM
-        } catch {}
+        $sidUsers = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+        $aclM = Get-Acl $multiDir
+        $aclM.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidUsers, "Modify", "ContainerInherit, ObjectInherit", "None", "Allow")))
+        Set-Acl $multiDir $aclM
+
+        & "$multiDir\multiotp.exe" -config max_fail_count=3 | Out-Null
+        & "$multiDir\multiotp.exe" -config lock_timeout=1800 | Out-Null
+        Log-Ok "multiOTP: 3 intentos max, bloqueo 30 min."
     }
+
+    $origenGateway = "C:\Users\Administrador\Admin_Sistemas\src\windows\Gateway-ZeroTrust.ps1"
+    $rutaGateway   = "C:\Admin_Sistemas\Gateway-ZeroTrust.ps1"
+    if (Test-Path $origenGateway) { Copy-Item $origenGateway -Destination $rutaGateway -Force }
 
     $sshdConfig = "C:\ProgramData\ssh\sshd_config"
     if (Test-Path $sshdConfig) {
-        # 1. Limpiar cualquier inyección previa para evitar duplicidad
-        $confLimpia = Get-Content $sshdConfig | Where-Object { 
-            $_ -notmatch "ForceCommand" -and 
-            $_ -notmatch "Match User" -and
-            $_ -notmatch "Gateway-ZeroTrust"
+        $confLimpia = Get-Content $sshdConfig | Where-Object {
+            $_ -notmatch "ForceCommand" -and $_ -notmatch "Match User" -and $_ -notmatch "Gateway-ZeroTrust"
         }
-
-        # 2. Asegurar que las contraseñas estén permitidas a nivel global
         $confLimpia = $confLimpia -replace "^#?PasswordAuthentication (no|yes)", "PasswordAuthentication yes"
-
-        # 3. Construir el nuevo bloque estricto
         $bloqueZeroTrust = @(
             "",
-            "# --- REGLAS DE GOBERNANZA ZERO-TRUST ---",
-            "Match User Administrador",
+            "Match User Administrador,Administrator",
             "    ForceCommand none",
             "",
-            "Match User *,!Administrador",
+            "Match User *,!Administrador,!Administrator",
             "    ForceCommand powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$rutaGateway`"",
-            "# ---------------------------------------"
+            ""
         )
-
-        # 4. Sobrescribir y reiniciar
         Set-Content -Path $sshdConfig -Value ($confLimpia + $bloqueZeroTrust) -Force
         Restart-Service sshd -Force -ErrorAction SilentlyContinue
-        Log-Ok "Directivas SSH inyectadas respetando el acceso del Administrador."
+        Log-Ok "Directivas SSH inyectadas."
     }
 }
 
@@ -144,22 +134,18 @@ function Configurar-UsuarioMFA {
     $motpDir = "C:\Program Files\multiOTP"
     if (-not (Test-Path "$motpDir\multiotp.exe")) { return "ERROR" }
 
-    # FIX: decodificación Base32 correcta
-    $hex = Base32-AHex -Base32 $Semilla
-
-    Push-Location $motpDir
-    .\multiotp.exe -delete $Usuario 2>&1 | Out-Null
-    .\multiotp.exe -fastcreate $Usuario 2>&1 | Out-Null
-    # FIX: agregar request_prefix_pin=0 — sin esto multiOTP espera PIN+token
-    #      y con PIN vacío el hash nunca coincide con los 6 dígitos del Authenticator
-    .\multiotp.exe -set $Usuario token_seed=$hex algorithm=TOTP time_interval=30 number_of_digits=6 request_prefix_pin=0 2>&1 | Out-Null
-    Pop-Location
-
-    # Guardar semilla Base32 en archivo local para poder mostrarla después
     $semillasDir = "C:\Admin_Sistemas\mfa_seeds"
     if (-not (Test-Path $semillasDir)) { New-Item $semillasDir -ItemType Directory -Force | Out-Null }
-    $Semilla | Out-File "$semillasDir\$Usuario.b32" -Encoding ASCII -Force
 
+    $dbPath = "$motpDir\users\$($Usuario.ToLower()).db"
+    if (Test-Path $dbPath) { Remove-Item $dbPath -Force }
+
+    Push-Location $motpDir
+    .\multiotp.exe -createga $Usuario.ToLower() $Semilla 2>&1 | Out-Null
+    .\multiotp.exe -set $Usuario.ToLower() prefix-pin=0 2>&1 | Out-Null
+    Pop-Location
+
+    $Semilla | Out-File "$semillasDir\$Usuario.b32" -Encoding ASCII -Force
     return $Semilla
 }
 
@@ -264,10 +250,12 @@ function Configurar-FGPP-Roles {
 function Aplicar-DelegacionControl {
     Log-Info "Fase 3: Inyectando ACLs restrictivos en Active Directory..."
     $dominio = (Get-ADDomain).DistinguishedName
+    $netbios  = (Get-ADDomain).Name
+
     try {
-        $sidStorage  = (Get-ADUser -Identity "admin_storage").SID
+        $sidStorage   = (Get-ADUser -Identity "admin_storage").SID
         $sidIdentidad = (Get-ADUser -Identity "admin_identidad").SID
-    } catch { return }
+    } catch { Log-Error "Faltan usuarios administradores."; return }
 
     $guidResetPassword = New-Object Guid("00299570-246d-11d0-a768-00aa006e0529")
     $guidUserClass     = New-Object Guid("bf967aba-0de6-11d0-a285-00aa003049e2")
@@ -275,13 +263,24 @@ function Aplicar-DelegacionControl {
     $reglaDeny  = New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sidStorage,   [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight, [System.Security.AccessControl.AccessControlType]::Deny,  $guidResetPassword, [System.DirectoryServices.ActiveDirectorySecurityInheritance]::Descendents, $guidUserClass)
     $reglaAllow = New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sidIdentidad, [System.DirectoryServices.ActiveDirectoryRights]::GenericAll,     [System.Security.AccessControl.AccessControlType]::Allow, [System.DirectoryServices.ActiveDirectorySecurityInheritance]::Descendents, $guidUserClass)
 
-    foreach ($ou in @("OU=Cuates,$dominio", "OU=No Cuates,$dominio")) {
-        if (Get-ADOrganizationalUnit -Identity $ou -ErrorAction SilentlyContinue) {
-            $acl = Get-Acl "AD:\$ou"
-            $acl.AddAccessRule($reglaDeny)
-            $acl.AddAccessRule($reglaAllow)
-            Set-Acl "AD:\$ou" -AclObject $acl
-        }
+    dsacls $dominio /I:S /D "$netbios\admin_storage:CA;Reset Password;user" 2>$null | Out-Null
+    Log-Ok "DENY Reset Password aplicado a nivel de dominio para admin_storage."
+
+    foreach ($ouName in @("Cuates", "No Cuates")) {
+        $ouObj = Get-ADOrganizationalUnit -Filter "Name -eq '$ouName'" -SearchBase $dominio -SearchScope Subtree -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $ouObj) { Log-Warning "OU '$ouName' no encontrada."; continue }
+
+        $ouDN = $ouObj.DistinguishedName
+        $acl  = Get-Acl "AD:\$ouDN"
+        $acl.AddAccessRule($reglaDeny)
+        $acl.AddAccessRule($reglaAllow)
+        Set-Acl "AD:\$ouDN" -AclObject $acl
+        Log-Ok "ACLs aplicadas en $ouDN"
+
+        dsacls $ouDN /I:T /G "$netbios\admin_identidad:CCDC;user"          2>$null | Out-Null
+        dsacls $ouDN /I:S /G "$netbios\admin_identidad:CA;Reset Password;user"  2>$null | Out-Null
+        dsacls $ouDN /I:S /G "$netbios\admin_identidad:CA;Change Password;user" 2>$null | Out-Null
+        Log-Ok "Delegacion admin_identidad aplicada en OU=$ouName."
     }
 }
 
@@ -297,36 +296,33 @@ function Desbloquear-UsuariosAD {
     }
 }
 function Sync-MFA-DesdeCSV {
-    # Resuelve la ruta 3 niveles hacia arriba, llegando a la raiz del repo
     $RutaCSV = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\..\..\config\usuarios.csv")
-    
     Log-Info "Sincronizando tokens MFA masivos desde CSV..."
-    if (-not (Test-Path $RutaCSV)) { 
-        Log-Error "No se encontro el archivo CSV en $RutaCSV"
-        return 
-    }
+    if (-not (Test-Path $RutaCSV)) { Log-Error "No se encontro el CSV en $RutaCSV"; return }
 
     $usuarios = Import-Csv -Path $RutaCSV -ErrorAction SilentlyContinue
     if (-not $usuarios) { Log-Error "El CSV esta vacio o corrupto."; return }
 
-    # Semillas fijas validas (Sin 0, 1, 8 ni 9)
-    $sCuates   = "CUATESAAAAAA2226" 
-    $sNoCuates = "NOCUATESAAAA2226" 
-    $motpDir = "C:\Program Files\multiOTP"
+    $sCuates   = "CUATESAAAAAA2226"
+    $sNoCuates = "NOCUATESAAAA2226"
+    $motpDir   = "C:\Program Files\multiOTP"
+    $semillasDir = "C:\Admin_Sistemas\mfa_seeds"
+    if (-not (Test-Path $semillasDir)) { New-Item $semillasDir -ItemType Directory -Force | Out-Null }
 
     Push-Location $motpDir
     foreach ($u in $usuarios) {
-        $username = $u.Usuario
-        $depto    = $u.Departamento
-        
-        $semilla = if ($depto -match "No Cuates") { $sNoCuates } else { $sCuates }
-        $hex = Base32-AHex -Base32 $semilla
-        
-        .\multiotp.exe -delete $username 2>&1 | Out-Null
-        .\multiotp.exe -fastcreate $username 2>&1 | Out-Null
-        .\multiotp.exe -set $username token_seed=$hex algorithm=TOTP time_interval=30 number_of_digits=6 request_prefix_pin=0 2>&1 | Out-Null
-        
-        Log-Ok "Identidad MFA vinculada: $username -> Grupo: $depto"
+        $username = $u.Usuario.Trim().ToLower()
+        $depto    = $u.Departamento.Trim()
+        $semilla  = if ($depto -match "No") { $sNoCuates } else { $sCuates }
+
+        $dbPath = "$motpDir\users\$username.db"
+        if (Test-Path $dbPath) { Remove-Item $dbPath -Force }
+
+        .\multiotp.exe -createga $username $semilla 2>&1 | Out-Null
+        .\multiotp.exe -set $username prefix-pin=0 2>&1 | Out-Null
+
+        $semilla | Out-File "$semillasDir\$username.b32" -Encoding ASCII -Force
+        Log-Ok "MFA vinculado: $username ($depto)"
     }
     Pop-Location
 }

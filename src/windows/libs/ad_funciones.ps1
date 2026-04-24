@@ -89,14 +89,20 @@ function Sync-IdentidadesCSV {
     # 3. PROCESAMIENTO DEL CSV (Con Filtro Anti-Crash)
     $usuariosData = Import-Csv -Path $RutaCSV -ErrorAction Stop
 
-    foreach ($user in $usuariosData) {
-        # FILTRO VITAL: Ignorar filas en blanco generadas por Excel al final del CSV
+        foreach ($user in $usuariosData) {
         if ([string]::IsNullOrWhiteSpace($user.Usuario)) { continue }
 
         $username = $user.Usuario.Trim()
-        $departamento = $user.Departamento.Trim()
+        
+        # --- LÓGICA DE DISTRIBUCIÓN DINÁMICA ---
+        # Filtramos la palabra para que el CSV sea flexible (Ej. "Cuate" o "No Cuate")
+        $deptRaw = $user.Departamento.Trim()
+        $departamento = if ($deptRaw -match "No") { "No Cuates" } else { "Cuates" }
+        
         $targetOU = "OU=$departamento,$ouBase"
         $nombreGrupoSeguridad = "Grupo_$departamento"
+        # ---------------------------------------
+
         $homeDirectory = "$recursoCompartido\$username"
         $profilePath = "$recursoPerfiles\$username"
         
@@ -177,4 +183,22 @@ function Instalar-InfraestructuraCore {
     
     Install-AddsForest -DomainName $DomainName -DomainNetbiosName $NetbiosName `
                        -SafeModeAdministratorPassword $SafeModePassword -Force:$true
+}
+
+Function Configurar-GpoLogoffForzado {
+    Write-Host "`n[*] Configurando GPO de Desconexión Forzada (Logoff)..." -ForegroundColor Yellow
+    $nombreGPO = "GPO_ZeroTrust_Logoff"
+    
+    if (-not (Get-GPO -Name $nombreGPO -ErrorAction SilentlyContinue)) {
+        $gpo = New-GPO -Name $nombreGPO
+        New-GPLink -Name $nombreGPO -Target (Get-ADDomain).DistinguishedName -LinkEnabled Yes | Out-Null
+        
+        # La directiva "Network security: Force logoff when logon hours expire" es una clave de registro
+        Set-GPRegistryValue -Name $nombreGPO -Key "HKLM\SYSTEM\CurrentControlSet\Services\LanManServer\Parameters" -ValueName "enableforcedlogoff" -Type DWord -Value 1 | Out-Null
+        
+        Write-Host "  [+] GPO '$nombreGPO' creada y vinculada al dominio." -ForegroundColor Green
+        Write-Host "  [!] Los usuarios serán expulsados automáticamente al terminar su turno." -ForegroundColor Green
+    } else {
+        Write-Host "  [-] La GPO de Logoff Forzado ya está activa." -ForegroundColor DarkGray
+    }
 }

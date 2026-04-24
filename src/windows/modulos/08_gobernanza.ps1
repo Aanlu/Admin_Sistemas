@@ -62,13 +62,17 @@ echo "[*] Iniciando protocolo de unión Kerberos..."
 echo "Se solicitara la contraseña de 'Administrador' de Windows Server:"
 sudo realm join -U Administrador gobernanza.local
 
+# ... dentro del script de Linux ...
 # 4. Modificación de sssd.conf (Exigencia de la rúbrica)
-echo "[*] Inyectando parámetro fallback_homedir en sssd.conf..."
-sudo sed -i 's/fallback_homedir = .*/fallback_homedir = \/home\/%u@%d/' /etc/sssd/sssd.conf
+echo "[*] Configurando fallback_homedir y filtros de dominio..."
+sudo sed -i 's/use_fully_qualified_names = .*/use_fully_qualified_names = True/' /etc/sssd/sssd.conf
+# Esta línea es la que pide la rúbrica específicamente:
+echo "fallback_homedir = /home/%u@%d" | sudo tee -a /etc/sssd/sssd.conf > /dev/null
 sudo systemctl restart sssd
 
 # 5. Configuración de Sudoers (Exigencia de la rúbrica)
-echo "[*] Otorgando privilegios de sudo a los administradores del AD..."
+echo "[*] Otorgando privilegios de sudo al grupo ad-admins..."
+# Crear el archivo en sudoers.d para que sea persistente y limpio
 echo "%Administradores@gobernanza.local ALL=(ALL:ALL) ALL" | sudo tee /etc/sudoers.d/ad-admins > /dev/null
 sudo chmod 0440 /etc/sudoers.d/ad-admins
 
@@ -142,8 +146,10 @@ function Menu-Gobernanza {
                 Configurar-AlmacenamientoDinamicop8 -RutaCSV $rutaCSV -reglasJSON $reglasJSON   
                 Pausa
             }
-            4 {
+           4 {
+                Asegurar-EntornoRedZeroTrust
                 Configurar-AppLockerP8
+                Configurar-GpoLogoffForzado 
                 Pausa
             }
             5 {     

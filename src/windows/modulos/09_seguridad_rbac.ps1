@@ -133,6 +133,37 @@ function Menu-EvaluacionP09 {
     }
 }
 
+function Sync-MFA-DesdeCSV {
+    $RutaCSV = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\..\..\config\usuarios.csv")
+    Log-Info "Sincronizando tokens MFA masivos desde CSV y forzando DB..."
+    if (-not (Test-Path $RutaCSV)) { Log-Error "No se encontro el CSV en $RutaCSV"; return }
+
+    $usuarios = Import-Csv -Path $RutaCSV -ErrorAction SilentlyContinue
+    if (-not $usuarios) { Log-Error "El CSV esta vacio o corrupto."; return }
+
+    $sCuates   = "CUATESAAAAAA2226"
+    $sNoCuates = "NOCUATESAAAA2226"
+    $motpDir   = "C:\Program Files\multiOTP"
+    $semillasDir = "C:\Admin_Sistemas\mfa_seeds"
+    if (-not (Test-Path $semillasDir)) { New-Item $semillasDir -ItemType Directory -Force | Out-Null }
+
+    Push-Location $motpDir
+    foreach ($u in $usuarios) {
+        $username = $u.Usuario.Trim().ToLower()
+        $depto    = $u.Departamento.Trim()
+        $semilla  = if ($depto -match "No") { $sNoCuates } else { $sCuates }
+
+        # Forzar borrado y re-creación en DB de multiOTP
+        .\multiotp.exe -delete $username 2>&1 | Out-Null
+        .\multiotp.exe -createga $username $semilla 2>&1 | Out-Null
+        .\multiotp.exe -set $username prefix-pin=0 2>&1 | Out-Null
+
+        $semilla | Out-File "$semillasDir\$username.b32" -Encoding ASCII -Force
+        Log-Ok "MFA anclado en DB y archivo: $username ($depto)"
+    }
+    Pop-Location
+}
+
 function Menu-P09 {
     $opciones = @(
         "1. Instalacion Completa (Infraestructura, Roles y Tokens)", 

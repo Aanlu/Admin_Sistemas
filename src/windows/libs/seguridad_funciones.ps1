@@ -24,38 +24,42 @@ function Crear-UsuariosRBAC {
     }
 }
 
+# Reemplazar la función de Delegación en seguridad_funciones.ps1
 function Aplicar-DelegacionControl {
-    Log-Info "Inyectando ACL restrictivo para admin_storage..."
-    
+    Log-Info "Fase 3: Inyectando ACLs restrictivos en Active Directory..."
     $dominio = (Get-ADDomain).DistinguishedName
-    $ouCuates = "OU=Cuates,$dominio"
-    $ouNoCuates = "OU=No Cuates,$dominio"
-    
+    $netbios  = (Get-ADDomain).Name
+
     try {
-        $sidStorage = (Get-ADUser -Identity "admin_storage").SID
+        $sidStorage   = (Get-ADUser -Identity "admin_storage").SID
         $sidIdentidad = (Get-ADUser -Identity "admin_identidad").SID
-    } catch {
-        Log-Error "Faltan usuarios administradores. Ejecuta el paso de creacion primero."
-        return
-    }
+    } catch { Log-Error "Faltan usuarios administradores."; return }
 
     $guidResetPassword = New-Object Guid("00299570-246d-11d0-a768-00aa006e0529")
-    $guidUserClass = New-Object Guid("bf967aba-0de6-11d0-a285-00aa003049e2")
+    $guidUserClass     = New-Object Guid("bf967aba-0de6-11d0-a285-00aa003049e2")
 
-    # Regla: Denegar a admin_storage
-    $reglaDeny = New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sidStorage, [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight, [System.Security.AccessControl.AccessControlType]::Deny, $guidResetPassword, [System.DirectoryServices.ActiveDirectorySecurityInheritance]::Descendents, $guidUserClass)
-    
-    # Regla: Permitir a admin_identidad
-    $reglaAllow = New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sidIdentidad, [System.DirectoryServices.ActiveDirectoryRights]::GenericAll, [System.Security.AccessControl.AccessControlType]::Allow, [System.DirectoryServices.ActiveDirectorySecurityInheritance]::Descendents, $guidUserClass)
+    $reglaDeny  = New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sidStorage,   [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight, [System.Security.AccessControl.AccessControlType]::Deny,  $guidResetPassword, [System.DirectoryServices.ActiveDirectorySecurityInheritance]::Descendents, $guidUserClass)
+    $reglaAllow = New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sidIdentidad, [System.DirectoryServices.ActiveDirectoryRights]::GenericAll,     [System.Security.AccessControl.AccessControlType]::Allow, [System.DirectoryServices.ActiveDirectorySecurityInheritance]::Descendents, $guidUserClass)
 
-    foreach ($targetOU in @($ouCuates, $ouNoCuates)) {
-        if (Get-ADOrganizationalUnit -Identity $targetOU -ErrorAction SilentlyContinue) {
-            $acl = Get-Acl "AD:\$targetOU"
-            $acl.AddAccessRule($reglaDeny)
-            $acl.AddAccessRule($reglaAllow)
-            Set-Acl "AD:\$targetOU" -AclObject $acl
-            Log-Ok "ACLs aplicadas en $targetOU"
-        }
+    # Inyección directa a nivel de dominio vía LDAP (Infalible)
+    dsacls $dominio /I:S /D "$netbios\admin_storage:CA;Reset Password;user" 2>$null | Out-Null
+    Log-Ok "DENY Reset Password aplicado a nivel de dominio para admin_storage."
+
+    foreach ($ouName in @("Cuates", "No Cuates")) {
+        $ouObj = Get-ADOrganizationalUnit -Filter "Name -eq '$ouName'" -SearchBase $dominio -SearchScope Subtree -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $ouObj) { Log-Warning "OU '$ouName' no encontrada."; continue }
+
+        $ouDN = $ouObj.DistinguishedName
+        $acl  = Get-Acl "AD:\$ouDN"
+        $acl.AddAccessRule($reglaDeny)
+        $acl.AddAccessRule($reglaAllow)
+        Set-Acl "AD:\$ouDN" -AclObject $acl
+        Log-Ok "ACLs aplicadas en $ouDN"
+
+        dsacls $ouDN /I:T /G "$netbios\admin_identidad:CCDC;user"          2>$null | Out-Null
+        dsacls $ouDN /I:S /G "$netbios\admin_identidad:CA;Reset Password;user"  2>$null | Out-Null
+        dsacls $ouDN /I:S /G "$netbios\admin_identidad:CA;Change Password;user" 2>$null | Out-Null
+        Log-Ok "Delegacion admin_identidad aplicada en OU=$ouName."
     }
 }
 
@@ -98,37 +102,61 @@ function Desbloquear-UsuariosAD {
 }
 
 function Preparar-InfraestructuraP09 {
-    Log-Info "Fase 0: Preparando terreno (Directorios, Compartidos y OUs)..."
+    Log-Info "Fase 0: Preparando terreno (Directorios, Compartidos, OUs y Permisos)..."
 
-    # 1. Preparar recurso compartido para Perfiles Móviles
     $rutaLocal = "C:\Admin_Sistemas\RoamingProfiles"
     if (-not (Test-Path $rutaLocal)) { 
         New-Item $rutaLocal -ItemType Directory -Force | Out-Null 
         Log-Ok "Directorio base creado: $rutaLocal"
     }
 
-    if (-not (Get-SmbShare -Name "RoamingProfiles$" -ErrorAction SilentlyContinue)) {
-        New-SmbShare -Name "RoamingProfiles$" -Path $rutaLocal -FullAccess "Todos" | Out-Null
-        Log-Ok "Recurso compartido oculto (RoamingProfiles$) levantado en la red."
-    } else {
-        Log-Warning "El recurso RoamingProfiles$ ya estaba activo."
-    }
+    # 1. Reparar Permisos de Red (SMB) - SOLUCIÓN AL PERFIL TEMPORAL
+    Remove-SmbShare -Name "RoamingProfiles$" -Force -ErrorAction SilentlyContinue
+    New-SmbShare -Name "RoamingProfiles$" -Path $rutaLocal -FullAccess "Todos" | Out-Null
+    Log-Ok "Recurso compartido (RoamingProfiles$) liberado con FullAccess a Todos."
 
-    # 2. Verificación de Unidades Organizativas (OUs) base
+    # 2. Reparar Permisos Físicos (NTFS) - SOLUCIÓN AL PERFIL TEMPORAL
+    Log-Info "Inyectando permisos NTFS Zero-Trust..."
+    $acl = Get-Acl $rutaLocal
+    $acl.SetAccessRuleProtection($true, $false) # Romper herencia
+
+    # Limpiar reglas existentes para evitar conflictos
+    $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) } | Out-Null
+
+    $ruleAdmins  = New-Object System.Security.AccessControl.FileSystemAccessRule("Administradores", "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow")
+    $ruleSystem  = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow")
+    $ruleCreator = New-Object System.Security.AccessControl.FileSystemAccessRule("CREATOR OWNER", "FullControl", "ContainerInherit, ObjectInherit", "InheritOnly", "Allow")
+    
+    # Regla clave: Usuarios solo pueden CREAR en la raíz, sin leer lo de otros
+    $ruleUsers   = New-Object System.Security.AccessControl.FileSystemAccessRule("Usuarios del dominio", "CreateFiles, AppendData, ReadAndExecute", "None", "None", "Allow")
+
+    $acl.AddAccessRule($ruleAdmins)
+    $acl.AddAccessRule($ruleSystem)
+    $acl.AddAccessRule($ruleCreator)
+    $acl.AddAccessRule($ruleUsers)
+
+    Set-Acl $rutaLocal $acl
+    Log-Ok "Permisos NTFS aplicados correctamente."
+
+    # 3. OUs y FGPP
     $dominio = (Get-ADDomain).DistinguishedName
-    $ous = @("Cuates", "No Cuates")
-    foreach ($ou in $ous) {
+    foreach ($ou in @("Cuates", "No Cuates")) {
         if (-not (Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -ErrorAction SilentlyContinue)) {
             New-ADOrganizationalUnit -Name $ou -Path $dominio | Out-Null
-            Log-Ok "Unidad Organizativa creada: $ou"
-        } else {
-            Log-Warning "La OU '$ou' ya existe. Omitiendo."
         }
     }
 
-    # 3. FGPP para Usuarios Normales (8 caracteres, tu código original)
     if (-not (Get-ADFineGrainedPasswordPolicy -Filter "Name -eq 'FGPP_Usuarios_8'" -ErrorAction SilentlyContinue)) {
         New-ADFineGrainedPasswordPolicy -Name "FGPP_Usuarios_8" -Precedence 20 -MinPasswordLength 8 -ComplexityEnabled $true
-        Log-Ok "Politica base para usuarios (8 caracteres) lista."
+    }
+
+    # 4. Auditoría y MFA
+    auditpol /set /subcategory:"{0cce9215-69ae-11d9-bed3-505054503030}" /success:enable /failure:enable | Out-Null
+    auditpol /set /subcategory:"{0cce9216-69ae-11d9-bed3-505054503030}" /success:enable /failure:enable | Out-Null
+    
+    $exeMFA = "C:\Program Files\multiOTP\multiotp.exe"
+    if (Test-Path $exeMFA) {
+        & $exeMFA -config max_fail_count=3 | Out-Null
+        & $exeMFA -config lock_timeout=1800 | Out-Null
     }
 }

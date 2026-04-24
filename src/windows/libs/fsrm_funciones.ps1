@@ -48,10 +48,19 @@ Function Configurar-AlmacenamientoDinamicop8 {
         New-FsrmFileScreenTemplate -Name $nombrePlantillaFiltro -IncludeGroup $nombreGrupoArchivos -Active:$true -Notification $accionEvidencia | Out-Null
     }
 
-    # Aplicar el escudo a la carpeta raíz (Se hereda automáticamente a todos los usuarios)
+    # Aplicar el escudo a la carpeta raíz de datos
     if (-Not (Get-FsrmFileScreen -Path $rutaBase -ErrorAction SilentlyContinue)) {
         New-FsrmFileScreen -Path $rutaBase -Template $nombrePlantillaFiltro | Out-Null
-        Write-Host "  [+] Escudo FSRM y Auditoria de Eventos activado en la raiz: $rutaBase" -ForegroundColor Green
+        Write-Host "  [+] Escudo FSRM activado en la raiz de datos: $rutaBase" -ForegroundColor Green
+    }
+
+    # NUEVO: Aplicar el escudo a los Perfiles Móviles para evitar evasión
+    $rutaPerfilesMoviles = "C:\Admin_Sistemas\RoamingProfiles"
+    if (Test-Path $rutaPerfilesMoviles) {
+        if (-Not (Get-FsrmFileScreen -Path $rutaPerfilesMoviles -ErrorAction SilentlyContinue)) {
+            New-FsrmFileScreen -Path $rutaPerfilesMoviles -Template $nombrePlantillaFiltro | Out-Null
+            Write-Host "  [+] Escudo FSRM extendido a los Perfiles Moviles (Anti-Evasion)." -ForegroundColor Green
+        }
     }
 
     # ==========================================================================

@@ -88,3 +88,22 @@ Function Guardar-Reglas {
     $ObjetoReglas | ConvertTo-Json -Depth 5 | Out-File -FilePath $rutaReglas -Encoding UTF8 -Force
     Write-Host "[OK] Reglas inyectadas en JSON exitosamente." -ForegroundColor Green
 }
+
+Function Asegurar-EntornoRedZeroTrust {
+    Write-Host "`n[*] Automatizando corrección de DNS y DHCP para el Dominio..." -ForegroundColor Cyan
+    
+    $IP_Servidor = "192.168.50.10" # Verifica que esta sea la IP de tu Server Core
+    
+    # Forzar DNS local en el servidor
+    Set-DnsClientServerAddress -InterfaceAlias "Ethernet*" -ServerAddresses ("127.0.0.1", "8.8.8.8")
+    
+    # Configurar DHCP para que los clientes resuelvan "gobernanza.local"
+    $ScopeId = (Get-DhcpServerv4Scope -ErrorAction SilentlyContinue).ScopeId
+    if ($ScopeId) {
+        Set-DhcpServerv4OptionValue -ScopeId $ScopeId -DnsServer $IP_Servidor -DnsDomain "gobernanza.local"
+        Restart-Service DHCPServer
+        Write-Host "  [+] Opciones DHCP parchadas. Los clientes apuntarán al DNS del servidor." -ForegroundColor Green
+    } else {
+        Write-Host "  [!] No se encontró un ámbito DHCP activo. Configúralo para que la red funcione." -ForegroundColor Yellow
+    }
+}

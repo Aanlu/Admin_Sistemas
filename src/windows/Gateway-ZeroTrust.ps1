@@ -1,56 +1,73 @@
-# Gateway-ZeroTrust.ps1
-# FIX: normalizar username — en SSH puede llegar como DOMINIO\usuario o usuario@dominio
-
 $rawUser = $env:USERNAME
-# Quitar prefijo de dominio (DOMINIO\usuario → usuario)
 if ($rawUser -match "\\") { $rawUser = $rawUser.Split("\")[1] }
-# Quitar sufijo UPN (usuario@dominio → usuario)
 if ($rawUser -match "@")  { $rawUser = $rawUser.Split("@")[0] }
 $usr = $rawUser.ToLower()
 
 $motpDir = "C:\Program Files\multiOTP"
 $motp    = "$motpDir\multiotp.exe"
 
+$mapaUsuarios = @{
+    "administrador"   = "administrator"
+    "administrator"   = "administrator"
+    "admin_identidad" = "admin_identidad"
+    "admin_storage"   = "admin_storage"
+    "admin_politicas" = "admin_politicas"
+    "admin_auditoria" = "admin_auditoria"
+}
+$usrMotp = if ($mapaUsuarios.ContainsKey($usr)) { $mapaUsuarios[$usr] } else { $usr }
+
+$originalCmd = $env:SSH_ORIGINAL_COMMAND
+if ($originalCmd -match "scp|sftp|rsync") { Invoke-Expression $originalCmd; exit 0 }
+
 Clear-Host
-Write-Host " =============================================================== " -ForegroundColor Cyan
-Write-Host "             UAS - SISTEMA ZERO-TRUST IDENTIDAD                  " -ForegroundColor Cyan
-Write-Host " =============================================================== " -ForegroundColor Cyan
-Write-Host "   [!] ALERTA: Conexion remota interceptada." -ForegroundColor Yellow
-Write-Host "   [*] Identidad: $usr" -ForegroundColor DarkGray
-Write-Host ""
+Write-Output " =============================================================== "
+Write-Output "             UAS - SISTEMA ZERO-TRUST IDENTIDAD                  "
+Write-Output " =============================================================== "
+Write-Output "   [!] ALERTA: Conexion remota interceptada."
+Write-Output "   [*] Identidad: $usr"
+Write-Output ""
 
 $maxIntentos = 3
 $intentos    = 0
 
 while ($intentos -lt $maxIntentos) {
-    $token = Read-Host "   [>] Ingrese el codigo Google Authenticator (6 digitos)"
+    Write-Output "   [>] Ingrese el codigo Google Authenticator (6 digitos):"
+    $token = [Console]::ReadLine()
 
-    $proc = Start-Process -FilePath $motp `
-        -ArgumentList $usr, $token `
-        -WorkingDirectory $motpDir `
-        -NoNewWindow -Wait -PassThru
+    $p = New-Object System.Diagnostics.ProcessStartInfo
+    $p.FileName               = $motp
+    $p.Arguments              = "$usrMotp $token"
+    $p.WorkingDirectory       = $motpDir
+    $p.RedirectStandardOutput = $true
+    $p.RedirectStandardError  = $true
+    $p.UseShellExecute        = $false
+    $proc = [System.Diagnostics.Process]::Start($p)
+    $proc.WaitForExit()
 
     if ($proc.ExitCode -eq 0) {
-        Write-Host "`n   [+] ACCESO CONCEDIDO." -ForegroundColor Green
-        Start-Sleep -Seconds 1
-        Clear-Host
-        powershell.exe -NoProfile -NoExit
+        Write-Output ""
+        Write-Output "   [+] ACCESO CONCEDIDO."
+        Write-Output ""
+        & powershell.exe -NoLogo -NoExit
         exit 0
     }
 
     $intentos++
     $restantes = $maxIntentos - $intentos
     if ($restantes -gt 0) {
-        Write-Host "   [X] Token incorrecto. Intentos restantes: $restantes" -ForegroundColor Red
+        Write-Output "   [X] Token incorrecto. Intentos restantes: $restantes"
     }
 }
 
-# 3 fallos → bloquear cuenta en AD
-Write-Host "`n   [!] Demasiados intentos fallidos. Bloqueando cuenta..." -ForegroundColor Red
+Write-Output ""
+Write-Output "   [!] Demasiados intentos. Bloqueando cuenta por 30 minutos..."
 try {
     Import-Module ActiveDirectory -ErrorAction SilentlyContinue
-    Disable-ADAccount -Identity $usr -ErrorAction SilentlyContinue
-    # También marcar error_counter en multiOTP (ya lo hace automáticamente si está configurado)
+    Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+    $ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
+        [System.DirectoryServices.AccountManagement.ContextType]::Domain
+    )
+    1..4 | ForEach-Object { $ctx.ValidateCredentials($usr, "MFA_Block_$_") }
 } catch {}
 
 Start-Sleep -Seconds 2

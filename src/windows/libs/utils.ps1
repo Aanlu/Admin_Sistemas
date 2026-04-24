@@ -321,3 +321,26 @@ function Capturar-IP-Opcional {
         Log-Error "IP invalida. Intente de nuevo o presione Enter para omitir."
     }
 }
+
+Function Descargar-ArchivoLigero {
+    param([string]$Url, [string]$Destino)
+    
+    $ProgressPreference = 'SilentlyContinue' # Apaga la barra azul pesada
+    $peticion = [System.Net.WebRequest]::Create($Url)
+    $respuesta = $peticion.GetResponse()
+    $tamanoTotal = $respuesta.ContentLength
+    $stream = $respuesta.GetResponseStream()
+    $archivo = New-Object System.IO.FileStream($Destino, [System.IO.FileMode]::Create)
+    $buffer = New-Object byte[] 8192
+    $leido = 0
+
+    while (($cantidad = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        $archivo.Write($buffer, 0, $cantidad)
+        $leido += $cantidad
+        $porcentaje = [math]::Round(($leido / $tamanoTotal) * 100, 0)
+        Write-Host "`r  [>] Descargando: $porcentaje% " -NoNewline -ForegroundColor Cyan
+    }
+    
+    $archivo.Close(); $stream.Close(); $respuesta.Close()
+    Write-Host "`r  [OK] Descarga completada: 100%      " -ForegroundColor Green
+}
