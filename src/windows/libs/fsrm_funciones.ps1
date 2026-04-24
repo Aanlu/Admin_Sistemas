@@ -4,109 +4,87 @@
 # ==============================================================================
 
 Function Configurar-AlmacenamientoDinamicop8 {
-    param (
-        [string]$RutaCSV, 
-        $reglasJSON # Pasamos el JSON como parámetro para aislar la función
-    )
+    param ([string]$RutaCSV, $reglasJSON)
 
     Write-Host "`n[*] Inicializando Gobernanza de Almacenamiento (FSRM)..." -ForegroundColor Yellow
 
     $usuarios = Import-Csv -Path $RutaCSV -ErrorAction SilentlyContinue
-    if (-not $usuarios) { 
-        Write-Host "[!] ERROR: CSV no encontrado o vacio en la ruta: $RutaCSV" -ForegroundColor Red
-        return 
+    if (-not $usuarios) { Write-Host "[!] ERROR: CSV no encontrado o vacio." -ForegroundColor Red; return }
+
+    $rutaBase           = "C:\Perfiles_P8"
+    $rutaPerfilesMoviles = "C:\Admin_Sistemas\RoamingProfiles"
+
+    foreach ($path in @($rutaBase, $rutaPerfilesMoviles)) {
+        if (-not (Test-Path $path)) { New-Item -Path $path -ItemType Directory -Force | Out-Null }
     }
 
-    # 1. Crear Bóveda Central y Recurso Compartido SMB
-    $rutaBase = "C:\Perfiles_P8"
-    if (-Not (Test-Path $rutaBase)) { 
-        New-Item -Path $rutaBase -ItemType Directory -Force | Out-Null 
-    }
-    
-    if (-Not (Get-SmbShare -Name "Perfiles_P8" -ErrorAction SilentlyContinue)) {
-        Write-Host "  [*] Generando recurso SMB (\\$($env:COMPUTERNAME)\Perfiles_P8)" -ForegroundColor Cyan
-        New-SmbShare -Name "Perfiles_P8" -Path $rutaBase -FullAccess "Todos" | Out-Null
-    }
-
-    # ==========================================================================
-    # 2. MOTOR DE APANTALLAMIENTO (FILE SCREENING) Y EVIDENCIAS
-    # ==========================================================================
     $nombreGrupoArchivos = "Bloqueo_Multimedia_Ejecutables_P8"
-    if (-Not (Get-FsrmFileGroup -Name $nombreGrupoArchivos -ErrorAction SilentlyContinue)) {
-        Write-Host "  [*] Creando Grupo de Archivos Prohibidos (*.mp3, *.exe, etc)..." -ForegroundColor Cyan
-        New-FsrmFileGroup -Name $nombreGrupoArchivos -IncludePattern @("*.mp3", "*.mp4", "*.exe", "*.msi") | Out-Null
+    if (-not (Get-FsrmFileGroup -Name $nombreGrupoArchivos -ErrorAction SilentlyContinue)) {
+        New-FsrmFileGroup -Name $nombreGrupoArchivos -IncludePattern @("*.mp3","*.mp4","*.exe","*.msi") | Out-Null
     }
-
-    # Crear la acción de Evidencia (Alerta Amarilla en Visor de Eventos)
-    $accionEvidencia = New-FsrmAction -Type Event -EventType Warning `
-        -Body "ALERTA ZERO-TRUST: El usuario [Source Io Owner] intento evadir la politica guardando el archivo prohibido: [Source File Path]." `
-        -RunLimitInterval 0
 
     $nombrePlantillaFiltro = "Plantilla_Filtro_ZeroTrust_P8"
-    if (-Not (Get-FsrmFileScreenTemplate -Name $nombrePlantillaFiltro -ErrorAction SilentlyContinue)) {
-        Write-Host "  [*] Generando Plantilla de Apantallamiento..." -ForegroundColor Cyan
-        New-FsrmFileScreenTemplate -Name $nombrePlantillaFiltro -IncludeGroup $nombreGrupoArchivos -Active:$true -Notification $accionEvidencia | Out-Null
+    if (-not (Get-FsrmFileScreenTemplate -Name $nombrePlantillaFiltro -ErrorAction SilentlyContinue)) {
+        $accionEvento = New-FsrmAction -Type Event -EventType Warning -Body "FSRM BLOQUEO: [Source Io Owner] intento guardar [Source File Path]" -RunLimitInterval 0
+        New-FsrmFileScreenTemplate -Name $nombrePlantillaFiltro -IncludeGroup $nombreGrupoArchivos -Active:$true -Notification $accionEvento | Out-Null
     }
 
-    # Aplicar el escudo a la carpeta raíz de datos
-    if (-Not (Get-FsrmFileScreen -Path $rutaBase -ErrorAction SilentlyContinue)) {
-        New-FsrmFileScreen -Path $rutaBase -Template $nombrePlantillaFiltro | Out-Null
-        Write-Host "  [+] Escudo FSRM activado en la raiz de datos: $rutaBase" -ForegroundColor Green
-    }
-
-    # NUEVO: Aplicar el escudo a los Perfiles Móviles para evitar evasión
-    $rutaPerfilesMoviles = "C:\Admin_Sistemas\RoamingProfiles"
-    if (Test-Path $rutaPerfilesMoviles) {
-        if (-Not (Get-FsrmFileScreen -Path $rutaPerfilesMoviles -ErrorAction SilentlyContinue)) {
-            New-FsrmFileScreen -Path $rutaPerfilesMoviles -Template $nombrePlantillaFiltro | Out-Null
-            Write-Host "  [+] Escudo FSRM extendido a los Perfiles Moviles (Anti-Evasion)." -ForegroundColor Green
+    foreach ($targetPath in @($rutaBase, $rutaPerfilesMoviles)) {
+        if (-not (Get-FsrmFileScreen -Path $targetPath -ErrorAction SilentlyContinue)) {
+            New-FsrmFileScreen -Path $targetPath -Template $nombrePlantillaFiltro -Active:$true | Out-Null
+            Write-Host "  [+] FileScreen activo (tiempo real) en: $targetPath" -ForegroundColor Green
         }
     }
-
-    # ==========================================================================
-    # 3. MOTOR DE CUOTAS DINÁMICAS E IDEMPOTENCIA
-    # ==========================================================================
-    Write-Host "  [*] Procesando Cuotas Strict-Limit por Usuario..." -ForegroundColor Cyan
 
     foreach ($user in $usuarios) {
         $valUser = $user.Usuario.Trim()
-        $depto = $user.Departamento.Trim()
-        
-        # Buscar regla exacta del JSON
+        $depto   = $user.Departamento.Trim()
+
         $regla = $reglasJSON.GruposDefinidos | Where-Object { $_.NombreDepartamento -eq $depto }
-        if (-Not $regla) { continue }
+        if (-not $regla) {
+            $regla = $reglasJSON.GruposDefinidos | Where-Object {
+                ($depto -match "No" -and $_.NombreDepartamento -match "No") -or
+                ($depto -notmatch "No" -and $_.NombreDepartamento -notmatch "No")
+            } | Select-Object -First 1
+        }
+        if (-not $regla) { continue }
 
-        # Generar la plantilla correspondiente si no existe (Ej. Plantilla_10MB_P8)
-        $nombrePlantillaCuota = "Plantilla_$($regla.LimiteCuotaMB)MB_P8"
-        if (-Not (Get-FsrmQuotaTemplate -Name $nombrePlantillaCuota -ErrorAction SilentlyContinue)) {
-            New-FsrmQuotaTemplate -Name $nombrePlantillaCuota -Size ($regla.LimiteCuotaMB * 1MB) | Out-Null
+        $limiteMB = $regla.LimiteCuotaMB
+        $nombrePlantillaCuota = "Plantilla_${limiteMB}MB_P8"
+
+        if (-not (Get-FsrmQuotaTemplate -Name $nombrePlantillaCuota -ErrorAction SilentlyContinue)) {
+            New-FsrmQuotaTemplate -Name $nombrePlantillaCuota -Size ($limiteMB * 1MB) -HardLimit $true | Out-Null
         }
 
-        # Asegurar que exista la carpeta física para inyectarle la cuota
-        $rutaUsuario = "$rutaBase\$valUser"
-        if (-Not (Test-Path $rutaUsuario)) { 
-            New-Item -Path $rutaUsuario -ItemType Directory -Force | Out-Null 
+        $rutaH = "$rutaBase\$valUser"
+        if (-not (Test-Path $rutaH)) { New-Item -Path $rutaH -ItemType Directory -Force | Out-Null }
+
+        foreach ($subDir in @("Desktop", "Documents", "Downloads")) {
+            $rutaSub = "$rutaH\$subDir"
+            if (-not (Test-Path $rutaSub)) { New-Item -Path $rutaSub -ItemType Directory -Force | Out-Null }
         }
 
-        # Lógica de Actualización (Idempotencia y Prevención de fallos)
-        $cuotaActual = Get-FsrmQuota -Path $rutaUsuario -ErrorAction SilentlyContinue
+        icacls $rutaH /grant "${valUser}:(OI)(CI)F" /T 2>$null | Out-Null
+        icacls $rutaH /grant "*S-1-5-32-544:(OI)(CI)F" /T 2>$null | Out-Null
 
+        $cuotaActual = Get-FsrmQuota -Path $rutaH -ErrorAction SilentlyContinue
         if ($cuotaActual) {
             if ($cuotaActual.Template -ne $nombrePlantillaCuota) {
-                
-                # Validación lógica: ¿El usuario tiene más datos de lo que permite su nueva cuota?
-                $nuevoLimiteBytes = $regla.LimiteCuotaMB * 1MB
-                if ($cuotaActual.Usage -gt $nuevoLimiteBytes) {
-                    Write-Host "      [!] PELIGRO: Imposible reducir cuota de $valUser a $($regla.LimiteCuotaMB)MB. Uso actual es mayor. Se requiere limpieza manual." -ForegroundColor Red
-                } else {
-                    Set-FsrmQuota -Path $rutaUsuario -Template $nombrePlantillaCuota | Out-Null
-                    Write-Host "      [~] Cuota de $valUser ajustada a $nombrePlantillaCuota (Cambio de departamento)" -ForegroundColor Magenta
-                }
+                Set-FsrmQuota -Path $rutaH -Template $nombrePlantillaCuota | Out-Null
+                Write-Host "      [~] Cuota de $valUser ajustada a $($limiteMB)MB" -ForegroundColor Magenta
             }
         } else {
-            New-FsrmQuota -Path $rutaUsuario -Template $nombrePlantillaCuota | Out-Null
-            Write-Host "      [+] Cuota RIGIDA de $($regla.LimiteCuotaMB)MB asignada a $valUser" -ForegroundColor Green
+            New-FsrmQuota -Path $rutaH -Template $nombrePlantillaCuota | Out-Null
+            Write-Host "      [+] Cuota rigida $($limiteMB)MB para $valUser en H: + subfolders" -ForegroundColor Green
+        }
+
+        $rutaV6 = "$rutaPerfilesMoviles\$valUser.V6"
+        if (Test-Path $rutaV6) {
+            if (-not (Get-FsrmQuota -Path $rutaV6 -ErrorAction SilentlyContinue)) {
+                New-FsrmQuota -Path $rutaV6 -Template $nombrePlantillaCuota | Out-Null
+                Write-Host "      [+] Cuota rigida $($limiteMB)MB en perfil movil $valUser.V6" -ForegroundColor Green
+            }
         }
     }
-    Write-Host "[OK] Subsistema de Almacenamiento FSRM actualizado y estable.`n" -ForegroundColor Green
+    Write-Host "[OK] FSRM sincronizado. FileScreen activo en tiempo real en Perfiles_P8 y RoamingProfiles.`n" -ForegroundColor Green
 }

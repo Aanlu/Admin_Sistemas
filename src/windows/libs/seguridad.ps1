@@ -3,39 +3,77 @@
 # PROPOSITO: RBAC, FGPP, ACLs, CRUD de Identidades y Gestión MFA
 # ==============================================================================
 
+function Configurar-FolderRedirection {
+    Log-Info "Configurando Folder Redirection (bloqueo FSRM en tiempo real)..."
+
+    $dominio  = (Get-ADDomain).DistinguishedName
+    $servidor = $env:COMPUTERNAME
+    $rutaBase = "C:\Perfiles_P8"
+    $gpoName  = "GPO_FolderRedirection"
+
+    if (-not (Test-Path $rutaBase)) { New-Item $rutaBase -ItemType Directory -Force | Out-Null }
+
+    $shareP8 = Get-SmbShare -Name "Perfiles_P8" -ErrorAction SilentlyContinue
+    if (-not $shareP8) {
+        $nombreTodos = (New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0")).Translate([System.Security.Principal.NTAccount]).Value
+        New-SmbShare -Name "Perfiles_P8" -Path $rutaBase -FullAccess $nombreTodos | Out-Null
+        Log-Ok "Share Perfiles_P8 creado."
+    }
+
+    icacls $rutaBase /inheritance:r                       2>$null | Out-Null
+    icacls $rutaBase /grant "*S-1-5-32-544:(OI)(CI)F"    2>$null | Out-Null
+    icacls $rutaBase /grant "*S-1-5-18:(OI)(CI)F"        2>$null | Out-Null
+    icacls $rutaBase /grant "*S-1-5-11:(RX,WD,AD)"       2>$null | Out-Null
+    icacls $rutaBase /grant "*S-1-3-0:(OI)(CI)(IO)F"     2>$null | Out-Null
+    Log-Ok "NTFS Perfiles_P8 configurado."
+
+    $gpo = Get-GPO -Name $gpoName -ErrorAction SilentlyContinue
+    if (-not $gpo) { $gpo = New-GPO -Name $gpoName }
+    New-GPLink -Name $gpoName -Target $dominio -LinkEnabled Yes -ErrorAction SilentlyContinue | Out-Null
+
+    $shareUNC = "\\$servidor\Perfiles_P8"
+    $regKey = "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+
+    @{
+        "Desktop"  = "Desktop"
+        "Personal" = "Documents"
+        "{374DE290-123F-4565-9164-39C4925E467B}" = "Downloads"
+    }.GetEnumerator() | ForEach-Object {
+        Set-GPRegistryValue -Name $gpoName -Key $regKey -ValueName $_.Key -Type ExpandString -Value "$shareUNC\%USERNAME%\$($_.Value)" | Out-Null
+    }
+
+    $gpoLogoff = "GPO_ZeroTrust_Logoff"
+    if (Get-GPO -Name $gpoLogoff -ErrorAction SilentlyContinue) {
+        Set-GPRegistryValue -Name $gpoLogoff -Key "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" -ValueName "DeleteRoamingCache" -Type DWord -Value 1 | Out-Null
+        Log-Ok "GPO: Borrar copia local al cerrar sesion activado."
+    }
+
+    Log-Ok "GPO Folder Redirection lista. En clientes: gpupdate /force y relogin."
+    Log-Warning "Desktop, Documents y Downloads apuntan a $shareUNC\%USERNAME%\... — FSRM bloquea en tiempo real."
+}
+
 function Preparar-InfraestructuraP09 {
     Log-Info "Fase 0: Preparando terreno..."
 
     $rutaLocal = "C:\Admin_Sistemas\RoamingProfiles"
     if (-not (Test-Path $rutaLocal)) { New-Item $rutaLocal -ItemType Directory -Force | Out-Null }
 
-    if (-not (Get-SmbShare -Name "RoamingProfiles$" -ErrorAction SilentlyContinue)) {
-        New-SmbShare -Name "RoamingProfiles$" -Path $rutaLocal -FullAccess "Everyone" | Out-Null
-        Log-Ok "Share RoamingProfiles creado (Full para Everyone, NTFS restringe)."
+    $share = Get-SmbShare -Name "RoamingProfiles$" -ErrorAction SilentlyContinue
+    if (-not $share) {
+        $nombreTodos = (New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0")).Translate([System.Security.Principal.NTAccount]).Value
+        New-SmbShare -Name "RoamingProfiles$" -Path $rutaLocal -FullAccess $nombreTodos | Out-Null
+        Log-Ok "Share RoamingProfiles creado."
+    } else {
+        Grant-SmbShareAccess -Name "RoamingProfiles$" -AccountName "Everyone" -AccessRight Full -Force | Out-Null
+        Log-Ok "Share RoamingProfiles permisos reparados a Full."
     }
 
-    $acl = Get-Acl $rutaLocal
-    $acl.SetAccessRuleProtection($true, $false)
-
-    $sidSystem    = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-    $sidAdmins    = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-    $sidCreator   = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::CreatorOwnerSid, $null)
-    $sidAuthUsers = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::AuthenticatedUserSid, $null)
-
-    $rFull    = [System.Security.AccessControl.FileSystemRights]::FullControl
-    $rProfile = [System.Security.AccessControl.FileSystemRights]"ReadAndExecute, AppendData, ReadPermissions"
-    $iAll     = [System.Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit"
-    $iNone    = [System.Security.AccessControl.InheritanceFlags]::None
-    $pNone    = [System.Security.AccessControl.PropagationFlags]::None
-    $pInhOnly = [System.Security.AccessControl.PropagationFlags]::InheritOnly
-    $aAllow   = [System.Security.AccessControl.AccessControlType]::Allow
-
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidSystem,    $rFull,    $iAll,  $pNone,    $aAllow)))
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidAdmins,   $rFull,    $iAll,  $pNone,    $aAllow)))
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidCreator,  $rFull,    $iAll,  $pInhOnly, $aAllow)))
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidAuthUsers,$rProfile, $iNone, $pNone,    $aAllow)))
-    Set-Acl $rutaLocal $acl
-    Log-Ok "Permisos NTFS SID-safe aplicados."
+    icacls $rutaLocal /inheritance:r                        2>$null | Out-Null
+    icacls $rutaLocal /grant "*S-1-5-32-544:(OI)(CI)F"     2>$null | Out-Null
+    icacls $rutaLocal /grant "*S-1-5-18:(OI)(CI)F"         2>$null | Out-Null
+    icacls $rutaLocal /grant "*S-1-5-11:(RX,WD,AD)"        2>$null | Out-Null
+    icacls $rutaLocal /grant "*S-1-3-0:(OI)(CI)(IO)F"      2>$null | Out-Null
+    Log-Ok "Permisos NTFS aplicados (CREATOR OWNER incluido)."
 
     $dominio = (Get-ADDomain).DistinguishedName
     foreach ($ou in @("Cuates", "No Cuates")) {
@@ -45,7 +83,7 @@ function Preparar-InfraestructuraP09 {
     }
 
     if (-not (Get-ADFineGrainedPasswordPolicy -Filter "Name -eq 'FGPP_Usuarios_8'" -ErrorAction SilentlyContinue)) {
-        New-ADFineGrainedPasswordPolicy -Name "FGPP_Usuarios_8" -Precedence 20 -MinPasswordLength 8 -ComplexityEnabled $true
+        New-ADFineGrainedPasswordPolicy -Name "FGPP_Usuarios_8" -Precedence 20 -MinPasswordLength 8 -ComplexityEnabled $true -LockoutThreshold 3 -LockoutDuration "00:30:00" -LockoutObservationWindow "00:30:00"
     }
 
     auditpol /set /subcategory:"{0cce9215-69ae-11d9-bed3-505054503030}" /success:enable /failure:enable | Out-Null
@@ -70,13 +108,9 @@ function Preparar-InfraestructuraP09 {
     }
 
     if (Test-Path "$multiDir\multiotp.exe") {
-        $sidUsers = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
-        $aclM = Get-Acl $multiDir
-        $aclM.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sidUsers, "Modify", "ContainerInherit, ObjectInherit", "None", "Allow")))
-        Set-Acl $multiDir $aclM
-
-        & "$multiDir\multiotp.exe" -config max_fail_count=3 | Out-Null
-        & "$multiDir\multiotp.exe" -config lock_timeout=1800 | Out-Null
+        icacls $multiDir /grant "*S-1-5-32-545:(OI)(CI)M" 2>$null | Out-Null
+        & "$multiDir\multiotp.exe" -config max_fail_count=3  2>$null | Out-Null
+        & "$multiDir\multiotp.exe" -config lock_timeout=1800 2>$null | Out-Null
         Log-Ok "multiOTP: 3 intentos max, bloqueo 30 min."
     }
 
@@ -103,6 +137,8 @@ function Preparar-InfraestructuraP09 {
         Restart-Service sshd -Force -ErrorAction SilentlyContinue
         Log-Ok "Directivas SSH inyectadas."
     }
+
+    Configurar-FolderRedirection
 }
 
 # ==============================================================================

@@ -101,58 +101,33 @@ function Desbloquear-UsuariosAD {
     }
 }
 
+# ARCHIVO: src/windows/libs/seguridad_funciones.ps1
 function Preparar-InfraestructuraP09 {
-    Log-Info "Fase 0: Preparando terreno (Directorios, Compartidos, OUs y Permisos)..."
+    Log-Info "Fase 0: Preparando terreno (C++, Bloqueos y Gateway)..."
 
-    $rutaLocal = "C:\Admin_Sistemas\RoamingProfiles"
-    if (-not (Test-Path $rutaLocal)) { 
-        New-Item $rutaLocal -ItemType Directory -Force | Out-Null 
-        Log-Ok "Directorio base creado: $rutaLocal"
+    # 1. Reanimación de multiOTP: Descarga e instala Visual C++
+    $vc64 = "$env:TEMP\vc_redist.x64.exe"
+    if (-not (Test-Path $vc64)) {
+        Log-Info "Descargando dependencias C++ para el motor MFA..."
+        Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vc64
+        Start-Process -FilePath $vc64 -ArgumentList "/install /quiet /norestart" -Wait
     }
 
-    # 1. Reparar Permisos de Red (SMB) - SOLUCIÓN AL PERFIL TEMPORAL
-    Remove-SmbShare -Name "RoamingProfiles$" -Force -ErrorAction SilentlyContinue
-    New-SmbShare -Name "RoamingProfiles$" -Path $rutaLocal -FullAccess "Todos" | Out-Null
-    Log-Ok "Recurso compartido (RoamingProfiles$) liberado con FullAccess a Todos."
-
-    # 2. Reparar Permisos Físicos (NTFS) - SOLUCIÓN AL PERFIL TEMPORAL
-    Log-Info "Inyectando permisos NTFS Zero-Trust..."
-    $acl = Get-Acl $rutaLocal
-    $acl.SetAccessRuleProtection($true, $false) # Romper herencia
-
-    # Limpiar reglas existentes para evitar conflictos
-    $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) } | Out-Null
-
-    $ruleAdmins  = New-Object System.Security.AccessControl.FileSystemAccessRule("Administradores", "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow")
-    $ruleSystem  = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow")
-    $ruleCreator = New-Object System.Security.AccessControl.FileSystemAccessRule("CREATOR OWNER", "FullControl", "ContainerInherit, ObjectInherit", "InheritOnly", "Allow")
-    
-    # Regla clave: Usuarios solo pueden CREAR en la raíz, sin leer lo de otros
-    $ruleUsers   = New-Object System.Security.AccessControl.FileSystemAccessRule("Usuarios del dominio", "CreateFiles, AppendData, ReadAndExecute", "None", "None", "Allow")
-
-    $acl.AddAccessRule($ruleAdmins)
-    $acl.AddAccessRule($ruleSystem)
-    $acl.AddAccessRule($ruleCreator)
-    $acl.AddAccessRule($ruleUsers)
-
-    Set-Acl $rutaLocal $acl
-    Log-Ok "Permisos NTFS aplicados correctamente."
-
-    # 3. OUs y FGPP
-    $dominio = (Get-ADDomain).DistinguishedName
-    foreach ($ou in @("Cuates", "No Cuates")) {
-        if (-not (Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -ErrorAction SilentlyContinue)) {
-            New-ADOrganizationalUnit -Name $ou -Path $dominio | Out-Null
-        }
+    # 2. Configuración de Política de Bloqueo Zero-Trust (3x30)
+    if (-not (Get-ADFineGrainedPasswordPolicy -Filter "Name -eq 'FGPP_Lockout_30'" -ErrorAction SilentlyContinue)) {
+        New-ADFineGrainedPasswordPolicy -Name "FGPP_Lockout_30" -Precedence 10 `
+            -LockoutThreshold 3 -LockoutDuration "00:30:00" -LockoutObservationWindow "00:30:00"
+        Log-Ok "Política de bloqueo 3 intentos / 30 min configurada."
     }
 
-    if (-not (Get-ADFineGrainedPasswordPolicy -Filter "Name -eq 'FGPP_Usuarios_8'" -ErrorAction SilentlyContinue)) {
-        New-ADFineGrainedPasswordPolicy -Name "FGPP_Usuarios_8" -Precedence 20 -MinPasswordLength 8 -ComplexityEnabled $true
-    }
+    # 3. Despliegue del Gateway a Producción
+    $DestGW = "C:\Admin_Sistemas\Gateway-ZeroTrust.ps1"
+    if (-not (Test-Path "C:\Admin_Sistemas")) { New-Item "C:\Admin_Sistemas" -ItemType Directory }
+    Copy-Item -Path "$PSScriptRoot\..\Gateway-ZeroTrust.ps1" -Destination $DestGW -Force
+    Log-Ok "Gateway Zero-Trust actualizado en C:\Admin_Sistemas."
 
-    # 4. Auditoría y MFA
-    auditpol /set /subcategory:"{0cce9215-69ae-11d9-bed3-505054503030}" /success:enable /failure:enable | Out-Null
-    auditpol /set /subcategory:"{0cce9216-69ae-11d9-bed3-505054503030}" /success:enable /failure:enable | Out-Null
+    # 4. Configuración de Auditoría de Logon
+    auditpol /set /subcategory:"Logon" /success:enable /failure:enable | Out-Null
     
     $exeMFA = "C:\Program Files\multiOTP\multiotp.exe"
     if (Test-Path $exeMFA) {

@@ -24,18 +24,33 @@ function Menu-GestionUsuariosP09 {
                 }
                 Pausa
             }
-            2 {
+           2 {
                 $u = Read-Host "Nombre del nuevo usuario"
                 $p = Read-Host "Contrasena" -AsSecureString
                 $opcTipo = @("Administrador", "Cuate", "No Cuate", "Individual/Externo")
-                $selTipo = Generar-Menu -Titulo "SELECCIONE EL TIPO DE PERFIL/MFA" -Opciones $opcTipo -TextoSalir "Cancelar"
-                if ($selTipo -lt 4) {
-                    $tipo = switch($selTipo) { 0 {"Admin"}; 1 {"Cuate"}; 2 {"NoCuate"}; 3 {"Individual"} }
-                    try {
-                        New-ADUser -Name $u -SamAccountName $u -AccountPassword $p -Enabled $true -ErrorAction Stop
-                        $key = Configurar-UsuarioMFA -Usuario $u -Semilla (-join ((1..16) | ForEach-Object { "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"[(Get-Random -Maximum 32)] }))
-                        Log-Ok "Usuario creado. Llave: $key"
-                    } catch { Log-Error $_.Exception.Message }
+                $tipo = Generar-Menu -Titulo "Tipo de MFA" -Opciones $opcTipo -TextoSalir "Cancelar"
+                
+                if ($tipo -ne $null) {
+                    New-ADUser -Name $u -SamAccountName $u -AccountPassword $p -Enabled $true
+                    
+                    # --- LÓGICA DE SEMILLAS CORREGIDA ---
+                    $semilla = switch ($opcTipo[$tipo]) {
+                        "Cuate"    { "CUATESAAAAAA2226" }
+                        "No Cuate" { "NOCUATESAAAA2226" }
+                        # Administradores y Externos SIEMPRE tienen tokens únicos e individuales
+                        Default    { [char[]](65..90) + 2..7 | Get-Random -Count 16 | Join-String }
+                    }
+
+                    # Inyectar directamente en la DB de multiOTP
+                    Push-Location "C:\Program Files\multiOTP"
+                    .\multiotp.exe -delete $u.ToLower() 2>$null
+                    .\multiotp.exe -createga $u.ToLower() $semilla | Out-Null
+                    .\multiotp.exe -set $u.ToLower() prefix-pin=0 | Out-Null
+                    Pop-Location
+                    
+                    # Guardar semilla para que el admin pueda mostrarla/generar QR
+                    $semilla | Out-File "C:\Admin_Sistemas\mfa_seeds\$u.b32" -Encoding ASCII -Force
+                    Log-Ok "Usuario creado. Tipo: $($opcTipo[$tipo]). Token vinculado."
                 }
                 Pausa
             }
