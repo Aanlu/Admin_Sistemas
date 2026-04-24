@@ -1,9 +1,11 @@
 ﻿# ==============================================================================
 # MÓDULO 08: Gobernanza Dinámica Zero-Trust
-# Arquitectura: Multicapa (Fase 0 Core -> Fase 1 Identidades -> Fase 2 GPOs)
 # ==============================================================================
 
-$libsDir = Join-Path $global:REPO_ROOT "src\windows\libs"
+# Resolución de ruta absoluta infalible (Sube un nivel a /windows y entra a /libs)
+$libsDir = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\libs")
+
+# Importar librerías forzosamente
 . "$libsDir\fsrm_funciones.ps1"
 . "$libsDir\gobernanza_funciones.ps1"
 . "$libsDir\applocker_funciones.ps1"

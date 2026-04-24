@@ -70,7 +70,7 @@ Function Configurar-AlmacenamientoDinamicop8 {
         # Generar la plantilla correspondiente si no existe (Ej. Plantilla_10MB_P8)
         $nombrePlantillaCuota = "Plantilla_$($regla.LimiteCuotaMB)MB_P8"
         if (-Not (Get-FsrmQuotaTemplate -Name $nombrePlantillaCuota -ErrorAction SilentlyContinue)) {
-            New-FsrmQuotaTemplate -Name $nombrePlantillaCuota -Size ($regla.LimiteCuotaMB * 1MB) -LimitType Hard | Out-Null
+            New-FsrmQuotaTemplate -Name $nombrePlantillaCuota -Size ($regla.LimiteCuotaMB * 1MB) | Out-Null
         }
 
         # Asegurar que exista la carpeta física para inyectarle la cuota

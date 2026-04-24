@@ -22,8 +22,9 @@ function Preparar-InfraestructuraP09 {
 
     $dominio = (Get-ADDomain).DistinguishedName
     foreach ($ou in @("Cuates", "No Cuates")) {
-        if (-not (Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -ErrorAction SilentlyContinue)) {
-            New-ADOrganizationalUnit -Name $ou -Path $dominio | Out-Null
+        $existeOU = Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -SearchBase $dominio -SearchScope OneLevel -ErrorAction SilentlyContinue
+        if (-not $existeOU) {
+            New-ADOrganizationalUnit -Name $ou -Path $dominio -ProtectedFromAccidentalDeletion $false | Out-Null
         }
     }
 
@@ -33,34 +34,84 @@ function Preparar-InfraestructuraP09 {
 
     auditpol /set /subcategory:"{0CCE9215-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable | Out-Null
 
-    $rutaGateway = "C:\Users\Administrador\Admin_Sistemas\src\windows\Gateway-ZeroTrust.ps1"
-    if (Test-Path "C:\Users\Administrador\Admin_Sistemas\src\windows\Gateway-ZeroTrust.ps1") {
-        Copy-Item "C:\Users\Administrador\Admin_Sistemas\src\windows\Gateway-ZeroTrust.ps1" -Destination $rutaGateway -Force
+    $origenGateway = "C:\Users\Administrador\Admin_Sistemas\src\windows\Gateway-ZeroTrust.ps1"
+    $rutaGateway = "C:\Admin_Sistemas\Gateway-ZeroTrust.ps1"
+    if (Test-Path $origenGateway) { Copy-Item $origenGateway -Destination $rutaGateway -Force }
+
+    # ====================================================================
+    # NUEVO: Validacion, Descarga e Instalacion automatica de multiOTP
+    # ====================================================================
+    $multiDir = "C:\Program Files\multiOTP"
+    if (-not (Test-Path "$multiDir\multiotp.exe")) {
+        Log-Warning "multiOTP no detectado. Intentando instalar automaticamente..."
+       try {
+            if (-not (Test-Path $multiDir)) { New-Item -ItemType Directory -Path $multiDir -Force | Out-Null }
+            $zipPath = "$env:TEMP\multiotp.zip"
+            $tempExt = "$env:TEMP\multiotp_ext"
+            
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri "https://download.multiotp.net/multiotp.zip" -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+            
+            Log-Info "Extrayendo archivos de multiOTP..."
+            if (Test-Path $tempExt) { Remove-Item $tempExt -Recurse -Force | Out-Null }
+            Expand-Archive -Path $zipPath -DestinationPath $tempExt -Force
+            
+            # Buscar dónde quedó el .exe dentro del ZIP extraído
+            $exe = Get-ChildItem -Path $tempExt -Filter "multiotp.exe" -Recurse | Select-Object -First 1
+            if ($exe) {
+                # Copiar solo el contenido del directorio del .exe hacia la raíz de C:\Program Files\multiOTP
+                Copy-Item -Path "$($exe.DirectoryName)\*" -Destination $multiDir -Recurse -Force
+                Log-Ok "multiOTP instalado correctamente en $multiDir"
+            } else {
+                Log-Error "No se encontro multiotp.exe dentro del archivo descargado."
+            }
+        } catch {
+            Log-Error "Fallo la descarga automatica (Sin internet o URL caida)."
+            Write-Host "`nACCION MANUAL REQUERIDA:" -ForegroundColor Red
+            Write-Host "1. Descargue 'multiotp.zip' en su maquina local desde https://multiotp.net/" -ForegroundColor Yellow
+            Write-Host "2. Transfiera el archivo al servidor." -ForegroundColor Yellow
+            Write-Host "3. Extraiga el contenido exactamente en: C:\Program Files\multiOTP\" -ForegroundColor Yellow
+            Write-Host "4. Asegurese de que exista el archivo: C:\Program Files\multiOTP\multiotp.exe`n" -ForegroundColor Yellow
+        }
     }
 
-    $multiDir = "C:\Program Files\multiOTP"
-    if (Test-Path $multiDir) {
-        $aclM = Get-Acl $multiDir
-        $ruleM = New-Object System.Security.AccessControl.FileSystemAccessRule("Usuarios", "Modify", "ContainerInherit, ObjectInherit", "None", "Allow")
-        $aclM.AddAccessRule($ruleM)
-        Set-Acl $multiDir $aclM
+    if (Test-Path "$multiDir\multiotp.exe") {
+        try {
+            $aclM = Get-Acl $multiDir
+            $ruleM = New-Object System.Security.AccessControl.FileSystemAccessRule("Usuarios", "Modify", "ContainerInherit, ObjectInherit", "None", "Allow")
+            $aclM.AddAccessRule($ruleM)
+            Set-Acl $multiDir $aclM
+        } catch {}
     }
 
     $sshdConfig = "C:\ProgramData\ssh\sshd_config"
     if (Test-Path $sshdConfig) {
-        $conf = Get-Content $sshdConfig
-        $newConf = @()
-        $inyectado = $false
-        foreach ($line in $conf) {
-            if ($line -match "(?i)^Match " -and -not $inyectado) {
-                $newConf += "ForceCommand powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$rutaGateway`""
-                $inyectado = $true
-            }
-            if ($line -notmatch "ForceCommand powershell") { $newConf += $line }
+        # 1. Limpiar cualquier inyección previa para evitar duplicidad
+        $confLimpia = Get-Content $sshdConfig | Where-Object { 
+            $_ -notmatch "ForceCommand" -and 
+            $_ -notmatch "Match User" -and
+            $_ -notmatch "Gateway-ZeroTrust"
         }
-        if (-not $inyectado) { $newConf += "ForceCommand powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$rutaGateway`"" }
-        $newConf | Set-Content $sshdConfig -Force
+
+        # 2. Asegurar que las contraseñas estén permitidas a nivel global
+        $confLimpia = $confLimpia -replace "^#?PasswordAuthentication (no|yes)", "PasswordAuthentication yes"
+
+        # 3. Construir el nuevo bloque estricto
+        $bloqueZeroTrust = @(
+            "",
+            "# --- REGLAS DE GOBERNANZA ZERO-TRUST ---",
+            "Match User Administrador",
+            "    ForceCommand none",
+            "",
+            "Match User *,!Administrador",
+            "    ForceCommand powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$rutaGateway`"",
+            "# ---------------------------------------"
+        )
+
+        # 4. Sobrescribir y reiniciar
+        Set-Content -Path $sshdConfig -Value ($confLimpia + $bloqueZeroTrust) -Force
         Restart-Service sshd -Force -ErrorAction SilentlyContinue
+        Log-Ok "Directivas SSH inyectadas respetando el acceso del Administrador."
     }
 }
 
@@ -244,4 +295,38 @@ function Desbloquear-UsuariosAD {
         Unlock-ADAccount -Identity $usrTarget
         Log-Ok "El usuario '$usrTarget' ha sido desbloqueado exitosamente."
     }
+}
+function Sync-MFA-DesdeCSV {
+    # Resuelve la ruta 3 niveles hacia arriba, llegando a la raiz del repo
+    $RutaCSV = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\..\..\config\usuarios.csv")
+    
+    Log-Info "Sincronizando tokens MFA masivos desde CSV..."
+    if (-not (Test-Path $RutaCSV)) { 
+        Log-Error "No se encontro el archivo CSV en $RutaCSV"
+        return 
+    }
+
+    $usuarios = Import-Csv -Path $RutaCSV -ErrorAction SilentlyContinue
+    if (-not $usuarios) { Log-Error "El CSV esta vacio o corrupto."; return }
+
+    # Semillas fijas validas (Sin 0, 1, 8 ni 9)
+    $sCuates   = "CUATESAAAAAA2226" 
+    $sNoCuates = "NOCUATESAAAA2226" 
+    $motpDir = "C:\Program Files\multiOTP"
+
+    Push-Location $motpDir
+    foreach ($u in $usuarios) {
+        $username = $u.Usuario
+        $depto    = $u.Departamento
+        
+        $semilla = if ($depto -match "No Cuates") { $sNoCuates } else { $sCuates }
+        $hex = Base32-AHex -Base32 $semilla
+        
+        .\multiotp.exe -delete $username 2>&1 | Out-Null
+        .\multiotp.exe -fastcreate $username 2>&1 | Out-Null
+        .\multiotp.exe -set $username token_seed=$hex algorithm=TOTP time_interval=30 number_of_digits=6 request_prefix_pin=0 2>&1 | Out-Null
+        
+        Log-Ok "Identidad MFA vinculada: $username -> Grupo: $depto"
+    }
+    Pop-Location
 }

@@ -47,8 +47,8 @@ function Asegurar-EnrutamientoDNS {
 }
 
 Function Cargar-Reglas {
-    # Usamos la ruta absoluta que verificamos en la auditoria para que nunca falle
-    $rutaReglas = "C:\Users\Administrador\Admin_Sistemas\config\reglas_gobernanza.json"
+    # Ruta dinamica (sube 3 niveles desde la libreria hasta la raiz)
+    $rutaReglas = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\..\..\config\reglas_gobernanza.json")
     
     if (-Not (Test-Path $rutaReglas)) {
         Write-Host "[!] ERROR CRÍTICO: No se encuentra el JSON en $rutaReglas" -ForegroundColor Red

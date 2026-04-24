@@ -60,10 +60,10 @@ function Configurar-DHCP {
     $SCOPE_NAME = Read-Host "Nombre del Ámbito (Scope)"
     if ([string]::IsNullOrWhiteSpace($SCOPE_NAME)) { $SCOPE_NAME = "Scope_Default" }
 
-    $IP_INICIAL = Capturar-IP "IP Inicial (Se asignará al Servidor)"
+    $IP_INICIAL = Capturar-IP "IP Inicial (Se asignará estáticamente a esta interfaz en el Servidor)"
     
     while ($true) {
-        $IP_FINAL = Capturar-IP "IP Final del rango"
+        $IP_FINAL = Capturar-IP "IP Final del rango a repartir"
         if (Validar-Rango $IP_INICIAL $IP_FINAL) { break }
         Log-Error "IP final inválida o fuera de rango."
     }
@@ -77,11 +77,11 @@ function Configurar-DHCP {
 
     $IP_RANGO_INICIO = Incrementar-IP $IP_INICIAL
 
-    $GW  = Capturar-IP-Opcional "Gateway"
-    $DNS = Capturar-IP "Servidor DNS principal"
+    $GW  = Capturar-IP-Opcional "Gateway (Dejar en blanco si es Red Interna estricta)"
+    $DNS = Capturar-IP "Servidor DNS principal (Normalmente la IP del Controlador de Dominio)"
 
     while ($true) {
-        $LEASE_STR = Read-Host "Tiempo de concesión (segundos)"
+        $LEASE_STR = Read-Host "Tiempo de concesión en segundos (Ej. 86400 para 1 día)"
         if ($LEASE_STR -match "^\d+$" -and [int]$LEASE_STR -gt 0) { 
             $LEASE_TIME = [int]$LEASE_STR
             break 
@@ -93,18 +93,15 @@ function Configurar-DHCP {
     $IP_ACTUAL   = if ($ipActualObj) { $ipActualObj.IPAddress } else { "" }
 
     try {
+        # 1. ESTABILIZACIÓN DE LA INTERFAZ
         if ($IP_INICIAL -ne $IP_ACTUAL) {
             $svcSSH = Get-Service -Name sshd -ErrorAction SilentlyContinue
             if ($svcSSH -and $svcSSH.Status -eq "Running") {
                 Write-Host "`n==========================================================" -ForegroundColor Red
                 Write-Host " [!] ALERTA DE DESCONEXIÓN INMINENTE [!] " -BackgroundColor Red -ForegroundColor White
                 Write-Host "==========================================================" -ForegroundColor Red
-                Write-Host "Se cambiará la IP principal del servidor. Su sesión remota se cortará."
+                Write-Host "Se cambiará la IP principal del servidor. Su sesión remota podría cortarse."
                 Write-Host "La nueva IP será: $IP_INICIAL" -ForegroundColor Yellow
-                Write-Host "`nPara reconectarse, copie y ejecute:"
-                Write-Host "----------------------------------------------------------"
-                Write-Host "ssh $env:USERNAME@$IP_INICIAL" -ForegroundColor Green
-                Write-Host "----------------------------------------------------------"
                 Write-Host "`nAplicando cambios en 5 segundos..." -ForegroundColor Cyan
                 Start-Sleep -Seconds 5
             }
@@ -129,10 +126,11 @@ function Configurar-DHCP {
             }
             Start-Sleep -Seconds 4
         } else {
-            Write-Host "`n[OK] La interfaz ya posee la IP $IP_INICIAL. Omitiendo reinicio para proteger sesión SSH." -ForegroundColor Green
+            Write-Host "`n[OK] La interfaz ya posee la IP $IP_INICIAL. Omitiendo reinicio." -ForegroundColor Green
         }
 
-        $scopeCheck = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue
+        # 2. PURGA Y CREACIÓN DEL ÁMBITO DHCP
+        $scopeCheck = Get-DhcpServerv4Scope -ScopeId $SUBNET_ID -ErrorAction SilentlyContinue
         if ($scopeCheck) { 
             $scopeCheck | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue 
         }
@@ -140,10 +138,32 @@ function Configurar-DHCP {
         $timespan = New-TimeSpan -Seconds $LEASE_TIME
         Add-DhcpServerv4Scope -Name $SCOPE_NAME -StartRange $IP_RANGO_INICIO -EndRange $IP_FINAL -SubnetMask $MASCARA -State Active -LeaseDuration $timespan -ErrorAction Stop | Out-Null
         
+        # 3. OPCIONES DE RED
         if ($GW) { Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 3 -Value @($GW) -Force -ErrorAction Stop }
-        Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 6 -Value @($DNS) -Force -ErrorAction Stop
-        Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 15 -Value $SCOPE_NAME -Force -ErrorAction Stop
         
+        # Intenta obtener el dominio dinámicamente para la Opción 15 (Sufijo DNS)
+        $dominioLocal = (Get-ADDomain -ErrorAction SilentlyContinue).Name
+        if (-not $dominioLocal) { $dominioLocal = $SCOPE_NAME }
+
+        Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 6 -Value @($DNS) -Force -ErrorAction Stop
+        Set-DhcpServerv4OptionValue -ScopeId $SUBNET_ID -OptionId 15 -Value $dominioLocal -Force -ErrorAction Stop
+        
+        # 4. AUTORIZACIÓN EN ACTIVE DIRECTORY (CRÍTICO)
+        try {
+            $fqdn = [System.Net.Dns]::GetHostByName($env:computerName).HostName
+            $isAuthorized = Get-DhcpServerInDC | Where-Object { $_.IPAddress -eq $IP_INICIAL }
+            if (-not $isAuthorized) {
+                Write-Host "[AVISO] Autorizando servidor DHCP en Active Directory..." -ForegroundColor Yellow
+                Add-DhcpServerInDC -DnsName $fqdn -IPAddress $IP_INICIAL -ErrorAction Stop
+                Write-Host "[OK] Servidor autorizado exitosamente en AD." -ForegroundColor Green
+            } else {
+                Write-Host "[OK] El servidor ya se encuentra autorizado en AD." -ForegroundColor Green
+            }
+        } catch {
+            Log-Warning "No se pudo autorizar en AD automáticamente. (El servicio podría no repartir IPs si el dominio lo bloquea)."
+        }
+
+        # 5. ARRANQUE DEL SERVICIO
         Abrir-Puertos-Servicio -NombreServicio "DHCP" -Puertos 67, 68 -Protocolo UDP
         Permitir-Ping-Global
         Restart-Service DHCPServer -Force
@@ -151,12 +171,13 @@ function Configurar-DHCP {
         Set-DhcpServerv4Binding -InterfaceAlias $ALIAS -BindingState $true -ErrorAction SilentlyContinue
         Restart-Service DHCPServer -Force
         
-        Log-Ok "Servicio Configurado y ACTIVO."
+        Log-Ok "Servicio DHCP Configurado y ACTIVO."
     } catch {
         Log-Error "Fallo en configuracion: $($_.Exception.Message)"
     }
     Pausa
 }
+
 
 function Alternar-Servicio-DHCP {
     Clear-Host

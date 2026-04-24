@@ -30,31 +30,44 @@ function Convertir-HorarioABytesUTC {
 }
 
 # La función principal con el nombre exacto que busca tu menú
+# La función principal blindada contra rutas vacías y saltos de línea
 function Sync-IdentidadesCSV {
     param([string]$RutaCSV)
 
     Write-Host "`n[*] Sincronizando Identidades y Horarios (Zero-Trust)..." -ForegroundColor Yellow
 
-    # 1. AUTODESCUBRIMIENTO DEL JSON
-    # La función busca el JSON asumiendo la estructura de carpetas de tu proyecto
-    $rutaJSON = "C:\Users\Administrador\Admin_Sistemas\config\reglas_gobernanza.json"
-    if (-not (Test-Path $rutaJSON)) {
-        # Fallback por si la ruta cambió
-        $rutaJSON = "$PSScriptRoot\..\config\reglas_gobernanza.json"
-        if (-not (Test-Path $rutaJSON)) {
-            Write-Host "  [!] ERROR CRITICO: No se encuentra el archivo JSON de reglas." -ForegroundColor Red
-            return
-        }
+    # 1. AUTODESCUBRIMIENTO INFALIBLE DE RUTAS
+    # Si la ruta global falla, triangulamos la posicion real del script
+    $basePath = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\..\..\")
+    $rutaJSON = Join-Path $basePath "config\reglas_gobernanza.json"
+    
+    if (-not $RutaCSV -or -not (Test-Path $RutaCSV -ErrorAction SilentlyContinue)) {
+        $RutaCSV = Join-Path $basePath "config\usuarios.csv"
     }
-    $reglasJSON = Get-Content $rutaJSON -Raw | ConvertFrom-Json
 
-    $domainInfo = Get-ADDomain
+    if (-not (Test-Path $rutaJSON)) {
+        Write-Host "  [!] ERROR CRITICO: No se encuentra reglas_gobernanza.json en: $rutaJSON" -ForegroundColor Red
+        return
+    }
+    if (-not (Test-Path $RutaCSV)) {
+        Write-Host "  [!] ERROR CRITICO: No se encuentra usuarios.csv en: $RutaCSV" -ForegroundColor Red
+        return
+    }
+
+    try {
+        $reglasJSON = Get-Content $rutaJSON -Raw | ConvertFrom-Json
+        $domainInfo = Get-ADDomain -ErrorAction Stop
+    } catch {
+        Write-Host "  [!] ERROR: El Servidor no es Controlador de Dominio o el JSON esta corrupto." -ForegroundColor Red
+        return
+    }
+    
     $domainName = $domainInfo.NetBIOSName
     $domainDN = $domainInfo.DistinguishedName
     $recursoCompartido = "\\$env:COMPUTERNAME\Perfiles_P8"
     $recursoPerfiles = "\\$env:COMPUTERNAME\RoamingProfiles$"
 
-    # 2. CREACIÓN DE ESTRUCTURA (OUs y Grupos)
+    # 2. CREACIÓN DE ESTRUCTURA CENTRAL (OUs y Grupos)
     $ouBase = "OU=Gobernanza,$domainDN"
     if (-not (Get-ADOrganizationalUnit -Filter "Name -eq 'Gobernanza'" -ErrorAction SilentlyContinue)) {
         New-ADOrganizationalUnit -Name "Gobernanza" -Path $domainDN | Out-Null
@@ -73,14 +86,13 @@ function Sync-IdentidadesCSV {
         }
     }
 
-    # 3. PROCESAMIENTO DEL CSV
-    if (-not (Test-Path $RutaCSV)) {
-        Write-Host "  [!] ERROR: No se encontro el CSV en $RutaCSV" -ForegroundColor Red
-        return
-    }
+    # 3. PROCESAMIENTO DEL CSV (Con Filtro Anti-Crash)
     $usuariosData = Import-Csv -Path $RutaCSV -ErrorAction Stop
 
     foreach ($user in $usuariosData) {
+        # FILTRO VITAL: Ignorar filas en blanco generadas por Excel al final del CSV
+        if ([string]::IsNullOrWhiteSpace($user.Usuario)) { continue }
+
         $username = $user.Usuario.Trim()
         $departamento = $user.Departamento.Trim()
         $targetOU = "OU=$departamento,$ouBase"
@@ -90,25 +102,33 @@ function Sync-IdentidadesCSV {
         
         $reglaAsignada = $reglasJSON.GruposDefinidos | Where-Object { $_.NombreDepartamento -eq $departamento }
         $adUser = Get-ADUser -Filter "SamAccountName -eq '$username'" -ErrorAction SilentlyContinue
-        $pass = ConvertTo-SecureString $user.Password -AsPlainText -Force
+        
+        # Salvaguarda por si la columna de password viene vacía
+        $passString = if ($user.Password) { $user.Password.Trim() } else { "ZeroTrust.2026*" }
+        $pass = ConvertTo-SecureString $passString -AsPlainText -Force
 
         # Lógica Idempotente (Crear o Actualizar)
         if (-not $adUser) {
             Write-Host "  [+] Creando nuevo usuario: $username" -ForegroundColor Green
-            New-ADUser -SamAccountName $username -UserPrincipalName "$username@$($domainInfo.DNSRoot)" `
-                       -Name "$($user.Nombre)" -GivenName $user.Nombre `
-                       -AccountPassword $pass -Enabled $true -Path $targetOU
+            try {
+                New-ADUser -SamAccountName $username -UserPrincipalName "$username@$($domainInfo.DNSRoot)" `
+                           -Name "$($user.Nombre)" -GivenName $user.Nombre `
+                           -AccountPassword $pass -Enabled $true -Path $targetOU
+            } catch {
+                Write-Host "      [X] Fallo al crear $username : $($_.Exception.Message)" -ForegroundColor Red
+                continue
+            }
         } else {
             Write-Host "  [~] Actualizando usuario existente: $username" -ForegroundColor Cyan
-            Set-ADAccountPassword -Identity $username -NewPassword $pass -Reset:$true
+            Set-ADAccountPassword -Identity $username -NewPassword $pass -Reset:$true -ErrorAction SilentlyContinue
             
             $currentOU = ($adUser.DistinguishedName -split ',', 2)[1]
             if ($currentOU -ne $targetOU) {
-                Move-ADObject -Identity $adUser.DistinguishedName -TargetPath $targetOU | Out-Null
+                Move-ADObject -Identity $adUser.DistinguishedName -TargetPath $targetOU -ErrorAction SilentlyContinue | Out-Null
             }
         }
 
-# 4. APLICACIÓN DE HORARIOS Y PERFILES (Manejo del Administrador Supremo)
+        # 4. APLICACIÓN DE HORARIOS Y PERFILES (Manejo del Administrador Supremo)
         $scriptLogon = "redireccion_carpetas.bat"
 
         if ($reglasJSON.AdministradoresSupremos -contains $username) {
@@ -122,19 +142,18 @@ function Sync-IdentidadesCSV {
             if ($reglaAsignada) {
                 [byte[]]$horasBytes = Convertir-HorarioABytesUTC -horaInicioLocal $reglaAsignada.HorarioPermitido.HoraInicio -horaFinLocal $reglaAsignada.HorarioPermitido.HoraFin
                 
-                # Inyección de perfil móvil y script de redirección
                 Set-ADUser -Identity $username -Title $departamento -Department $departamento `
                            -HomeDrive "H:" -HomeDirectory $homeDirectory `
                            -ProfilePath $profilePath -ScriptPath $scriptLogon -ErrorAction SilentlyContinue
                 
                 Set-ADUser -Identity $username -Clear logonhours -ErrorAction SilentlyContinue
-                Set-ADUser -Identity $username -Replace @{logonhours = $horasBytes} -ErrorAction Stop
+                Set-ADUser -Identity $username -Replace @{logonhours = $horasBytes} -ErrorAction SilentlyContinue
                 
-                Write-Host "      -> Horario UTC, Perfil Móvil y Redirección inyectados correctamente." -ForegroundColor DarkGray
+                Write-Host "      -> Horario UTC, Perfil Movil y Redireccion inyectados." -ForegroundColor DarkGray
             }
         }
 
-        # 5. ASIGNACIÓN ESTRICTA DE GRUPOS (Para AppLocker y FSRM)
+        # 5. ASIGNACIÓN ESTRICTA DE GRUPOS
         foreach ($grp in $reglasJSON.GruposDefinidos.NombreDepartamento) {
             Remove-ADGroupMember -Identity "Grupo_$grp" -Members $username -Confirm:$false -ErrorAction SilentlyContinue
         }
@@ -142,4 +161,20 @@ function Sync-IdentidadesCSV {
     }
     
     Write-Host "[OK] Motor de Sincronizacion CSV ejecutado con exito." -ForegroundColor Green
+}
+function Instalar-InfraestructuraCore {
+    Write-Host "[*] INICIANDO ORQUESTACION DE FASE 0: AD DS, DNS Y DHCP..." -ForegroundColor Cyan
+
+    Write-Host "[*] Instalando roles de servidor..." -ForegroundColor Yellow
+    Install-WindowsFeature -Name AD-Domain-Services, DNS, DHCP, FS-Resource-Manager -IncludeManagementTools
+
+    $DomainName = "gobernanza.local"
+    $NetbiosName = "GOBERNANZA"
+    
+    Write-Host "[!] PROMOVIENDO SERVIDOR A DC. EL SISTEMA SE REINICIARA AL FINALIZAR." -ForegroundColor Red
+    
+    $SafeModePassword = ConvertTo-SecureString "ZeroTrust.2026*" -AsPlainText -Force
+    
+    Install-AddsForest -DomainName $DomainName -DomainNetbiosName $NetbiosName `
+                       -SafeModeAdministratorPassword $SafeModePassword -Force:$true
 }

@@ -134,7 +134,13 @@ function Menu-EvaluacionP09 {
 }
 
 function Menu-P09 {
-    $opciones = @("1. Instalacion Completa (Infraestructura, Roles y Tokens)", "2. Gestion de Usuarios (Ver Tokens / Cambiar Claves)", "3. Submenu de Evaluacion (Teleprompter de Comandos)", "4. Desbloquear Usuarios AD (Lockout)")
+    $opciones = @(
+        "1. Instalacion Completa (Infraestructura, Roles y Tokens)", 
+        "2. Gestion de Usuarios (Ver Tokens / Cambiar Claves)", 
+        "3. Submenu de Evaluacion (Teleprompter de Comandos)", 
+        "4. Desbloquear Usuarios AD (Lockout)",
+        "5. Sincronizar MFA Masivo desde CSV" # <--- NUEVA OPCION
+    )
 
     while ($true) {
         $op = Generar-Menu -Titulo "MODULO 09: SEGURIDAD, RBAC Y MFA" -Opciones $opciones -TextoSalir "Volver al Menu Principal"
@@ -145,7 +151,8 @@ function Menu-P09 {
             1 { Menu-GestionUsuariosP09 }
             2 { Menu-EvaluacionP09 }
             3 { Desbloquear-UsuariosAD; Pausa }
-            4 { return }
+            4 { Sync-MFA-DesdeCSV; Pausa } # <--- LLAMADA A LA FUNCION
+            5 { return }
         }
     }
 }
