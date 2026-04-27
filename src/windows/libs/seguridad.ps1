@@ -64,7 +64,8 @@ function Preparar-InfraestructuraP09 {
         New-SmbShare -Name "RoamingProfiles$" -Path $rutaLocal -FullAccess $nombreTodos | Out-Null
         Log-Ok "Share RoamingProfiles creado."
     } else {
-        Grant-SmbShareAccess -Name "RoamingProfiles$" -AccountName "Everyone" -AccessRight Full -Force | Out-Null
+        $nombreTodos = (New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0")).Translate([System.Security.Principal.NTAccount]).Value
+        Grant-SmbShareAccess -Name "RoamingProfiles$" -AccountName $nombreTodos -AccessRight Full -Force | Out-Null
         Log-Ok "Share RoamingProfiles permisos reparados a Full."
     }
 

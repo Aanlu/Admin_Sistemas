@@ -2,6 +2,7 @@
 # MODULO 09: Seguridad de Identidad, Delegacion RBAC y MFA
 # ==============================================================================
 . "$PSScriptRoot\..\libs\seguridad.ps1"
+. "$PSScriptRoot\..\libs\fsrm_funciones.ps1"  # <--- ESTA ES LA LÍNEA QUE FALTA
 
 function Menu-GestionUsuariosP09 {
     $opcs = @("Mostrar Token MFA de un usuario", "Restablecer Contrasena de AD", "Crear Usuario Nuevo", "Eliminar Usuario")
@@ -25,32 +26,78 @@ function Menu-GestionUsuariosP09 {
                 Pausa
             }
            2 {
-                $u = Read-Host "Nombre del nuevo usuario"
+                Write-Host "--- NUEVA IDENTIDAD INTEGRAL ---" -ForegroundColor Cyan
+                $nombreCompleto = Read-Host "Nombre completo (Ej: Carlos Slim)"
+                $samAccount     = Read-Host "Username (Ej: carlos01)"
+                
+                # Leer contraseña y convertirla a texto plano de forma segura para el CSV
                 $p = Read-Host "Contrasena" -AsSecureString
+                $passPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($p))
+                
                 $opcTipo = @("Administrador", "Cuate", "No Cuate", "Individual/Externo")
-                $tipo = Generar-Menu -Titulo "Tipo de MFA" -Opciones $opcTipo -TextoSalir "Cancelar"
+                $tipo = Generar-Menu -Titulo "Clasificacion de Privilegios" -Opciones $opcTipo -TextoSalir "Cancelar"
                 
                 if ($tipo -ne $null) {
-                    New-ADUser -Name $u -SamAccountName $u -AccountPassword $p -Enabled $true
+                    $grupo = $opcTipo[$tipo]
+                    $dominio = (Get-ADDomain).DistinguishedName
                     
-                    # --- LÓGICA DE SEMILLAS CORREGIDA ---
-                    $semilla = switch ($opcTipo[$tipo]) {
+                    # 1. Definir rutas y departamento según el grupo
+                    $ouPath = ""
+                    $deptoCSV = "Externo"
+                    if ($grupo -eq "Cuate") { $ouPath = "OU=Cuates,$dominio"; $deptoCSV = "Cuates" }
+                    if ($grupo -eq "No Cuate") { $ouPath = "OU=No Cuates,$dominio"; $deptoCSV = "No Cuates" }
+                    if ($grupo -eq "Administrador") { $deptoCSV = "Sistemas" }
+
+                    # 2. Creación en Active Directory
+                    $perfilUNC = "\\$env:COMPUTERNAME\Perfiles_P8\$samAccount"
+                    if ($ouPath) {
+                        New-ADUser -Name $nombreCompleto -SamAccountName $samAccount -AccountPassword $p -Enabled $true -Path $ouPath -ProfilePath $perfilUNC
+                    } else {
+                        New-ADUser -Name $nombreCompleto -SamAccountName $samAccount -AccountPassword $p -Enabled $true -ProfilePath $perfilUNC
+                    }
+                    
+                    # 3. Lógica de Tokens MFA (Aquí aseguramos que los Cuates compartan token)
+                    $semilla = switch ($grupo) {
                         "Cuate"    { "CUATESAAAAAA2226" }
                         "No Cuate" { "NOCUATESAAAA2226" }
-                        # Administradores y Externos SIEMPRE tienen tokens únicos e individuales
-                        Default    { [char[]](65..90) + 2..7 | Get-Random -Count 16 | Join-String }
+                        Default    { [char[]](65..90) + 2..7 | Get-Random -Count 16 | Join-String } # Admin y Externos son individuales
                     }
 
-                    # Inyectar directamente en la DB de multiOTP
                     Push-Location "C:\Program Files\multiOTP"
-                    .\multiotp.exe -delete $u.ToLower() 2>$null
-                    .\multiotp.exe -createga $u.ToLower() $semilla | Out-Null
-                    .\multiotp.exe -set $u.ToLower() prefix-pin=0 | Out-Null
+                    .\multiotp.exe -delete $samAccount.ToLower() 2>$null
+                    .\multiotp.exe -createga $samAccount.ToLower() $semilla | Out-Null
+                    .\multiotp.exe -set $samAccount.ToLower() prefix-pin=0 | Out-Null
                     Pop-Location
+                    $semilla | Out-File "C:\Admin_Sistemas\mfa_seeds\$samAccount.b32" -Encoding ASCII -Force
                     
-                    # Guardar semilla para que el admin pueda mostrarla/generar QR
-                    $semilla | Out-File "C:\Admin_Sistemas\mfa_seeds\$u.b32" -Encoding ASCII -Force
-                    Log-Ok "Usuario creado. Tipo: $($opcTipo[$tipo]). Token vinculado."
+                  # 4. Inyección en el archivo CSV (Protección Anti-Colisión)
+                    $rutaCSV = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\..\..\config\usuarios.csv")
+                    $nuevaLinea = "$nombreCompleto,$samAccount,$passPlain,$deptoCSV"
+                    
+                    if (Test-Path $rutaCSV) {
+                        # Leemos todo el archivo como un solo bloque de texto continuo (-Raw)
+                        $contenidoCrudo = Get-Content $rutaCSV -Raw
+                        
+                        # Evaluamos lógicamente: ¿El archivo NO termina con un salto de línea (`n)?
+                        if ($contenidoCrudo -and -not $contenidoCrudo.EndsWith("`n")) {
+                            # Si es cierto, inyectamos un salto de línea forzado (Carriage Return + Line Feed)
+                            Write-Host "   [~] Detectada falta de salto de linea en CSV. Corrigiendo..." -ForegroundColor Magenta
+                            "`r`n" | Out-File -FilePath $rutaCSV -Append -NoNewline -Encoding UTF8
+                        }
+                    }
+                    
+                    # Con el terreno seguro, escribimos el nuevo usuario. Out-File agregará automáticamente un `n al final.
+                    $nuevaLinea | Out-File -FilePath $rutaCSV -Append -Encoding UTF8
+                    Log-Ok "Usuario $samAccount añadido de forma segura al archivo usuarios.csv"
+
+                    # 5. Ejecutar FSRM Automáticamente para este usuario
+                    $rutaJSON = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\..\..\config\reglas_gobernanza.json")
+                    if ((Test-Path $rutaCSV) -and (Test-Path $rutaJSON)) {
+                        $reglasJSON = Get-Content $rutaJSON -Raw | ConvertFrom-Json
+                        Configurar-AlmacenamientoDinamicop8 -RutaCSV $rutaCSV -reglasJSON $reglasJSON
+                    }
+
+                    Log-Ok "IDENTIDAD COMPLETADA: AD + MFA ($grupo) + CSV + FSRM."
                 }
                 Pausa
             }
