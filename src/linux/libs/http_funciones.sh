@@ -192,11 +192,24 @@ configurar_puerto_servicio() {
 
     case "$motor" in
         apache2)
-            sed -i "s/^Listen .*/Listen $puerto/" /etc/apache2/ports.conf
+            # FIX: Sobrescribir el ports.conf limpiamente para evitar Listeners duplicados
+            cat > /etc/apache2/ports.conf <<EOF
+Listen $puerto
+<IfModule ssl_module>
+    Listen 443
+</IfModule>
+<IfModule mod_gnutls.c>
+    Listen 443
+</IfModule>
+EOF
+            # Cambiar el VirtualHost por defecto
+            sed -i "s|DocumentRoot .*|DocumentRoot /var/www/apache2|g" /etc/apache2/sites-available/000-default.conf
             sed -i "s/<VirtualHost \*:.*>/<VirtualHost \*:$puerto>/" \
                 /etc/apache2/sites-available/000-default.conf
             ;;
         nginx)
+            sed -i "s|root /var/www/html|root /var/www/nginx|g" /etc/nginx/sites-available/default
+            sed -i "s|root /var/www/nginx;|root /var/www/nginx;|g" /etc/nginx/sites-available/default
             sed -i "s/listen [0-9]\+/listen $puerto/g" \
                 /etc/nginx/sites-available/default
             ;;
@@ -281,6 +294,7 @@ aislar_directorio_web() {
         find /opt/tomcat/webapps -type d -exec chmod 750 {} \;
         find /opt/tomcat/webapps -type f -exec chmod 640 {} \;
     else
+        mkdir -p /var/www/$motor
         chown -R www-data:www-data /var/www/$motor
         find /var/www/$motor -type d -exec chmod 755 {} \;
         find /var/www/$motor -type f -exec chmod 644 {} \;
@@ -301,7 +315,7 @@ desplegar_plantilla_html() {
     # CWD puede cambiar dependiendo de cómo se ejecutó el script
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local ruta_template="${script_dir}/../../templates/linux/index.web.template"
+    local ruta_template="${script_dir}/../../../templates/linux/index.web.template"
 
     if [ -f "$ruta_template" ]; then
         cp "$ruta_template" "$ruta_html"
@@ -314,6 +328,7 @@ desplegar_plantilla_html() {
         printf '<h1>%s — v%s</h1>\n<p>Puerto: <span id="puerto-display">%s</span></p>\n' \
             "${motor^^}" "$version" "$puerto" > "$ruta_html"
     fi
+    [ "$motor" == "tomcat" ] && chown -R tomcat:tomcat /opt/tomcat/webapps/ROOT 2>/dev/null
 }
 
 purgar_motor_http() {

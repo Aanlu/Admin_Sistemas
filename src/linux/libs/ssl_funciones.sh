@@ -91,10 +91,16 @@ activar_ssl_apache2() {
         echo "ServerName $dominio" >> /etc/apache2/apache2.conf
     fi
 
-# Añadir puerto SSL en ports.conf SOLO si no existe ya
-    if ! grep -qE "^Listen\s+${puerto_ssl}(\s|$)" /etc/apache2/ports.conf 2>/dev/null; then
-        echo "Listen $puerto_ssl" >> /etc/apache2/ports.conf
-    fi
+    # FIX: Sobrescribir ports.conf garantizando ambos puertos sin duplicados
+    cat > /etc/apache2/ports.conf <<EOF
+Listen $puerto_http
+<IfModule ssl_module>
+    Listen $puerto_ssl
+</IfModule>
+<IfModule mod_gnutls.c>
+    Listen $puerto_ssl
+</IfModule>
+EOF
 
     # 5. Crear VirtualHost SSL (desde plantilla o inline)
     local vhost_file="/etc/apache2/sites-available/ssl_${dominio}.conf"
@@ -466,14 +472,14 @@ resumen_ssl_linux() {
 
     echo -e "${AZUL}Dominio PKI base: ${VERDE}$dominio${RESET}\n"
 
-    printf "${AMARILLO}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
-        "MOTOR" "P.HTTP" "P.SSL" "ACTIVO" "ESTADO CERTIFICADO"
-    echo "-------------------------------------------------------------------"
+    printf "${AMARILLO}%-10s %-8s %-8s %-8s %-34s %s${RESET}\n" \
+        "MOTOR" "P.HTTP" "P.SSL" "ACTIVO" "ESTADO CERTIFICADO" "ENLACE DIRECTO"
+    echo "--------------------------------------------------------------------------------------"
 
     local motores=("APACHE2" "NGINX" "TOMCAT")
 
     for motor in "${motores[@]}"; do
-        local p_http p_ssl ssl_activo estado_cert color
+        local p_http p_ssl ssl_activo estado_cert color url
 
         p_http=$(leer_estado "PUERTO_HTTP_${motor}" 2>/dev/null)
         p_ssl=$(leer_estado "PUERTO_SSL_${motor}"   2>/dev/null)
@@ -482,18 +488,19 @@ resumen_ssl_linux() {
         [ -z "$p_http" ]    && p_http="--"
         [ -z "$p_ssl" ]     && p_ssl="--"
         [ -z "$ssl_activo" ] && ssl_activo="--"
+        url="--"
 
         if [ "$ssl_activo" == "SI" ] && [ "$p_ssl" != "--" ]; then
-            # Verificación real con openssl s_client (timeout 3s)
+            url="https://${dominio}:${p_ssl}"
+            # Verificación real con openssl
             local resultado
-            resultado=$(echo "Q" | timeout 3s openssl s_client \
-                -connect "127.0.0.1:${p_ssl}" \
-                -servername "$dominio" 2>&1)
+            resultado=$(echo "Q" | timeout 3s openssl s_client -connect "127.0.0.1:${p_ssl}" -servername "$dominio" 2>&1)
 
             if echo "$resultado" | grep -q "CONNECTED"; then
+                # FIX: Extraer fecha correctamente procesando el certificado x509
                 local fecha_exp
-                fecha_exp=$(echo "$resultado" \
-                    | grep "notAfter" | awk -F= '{print $2}')
+                fecha_exp=$(echo "$resultado" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+                [ -z "$fecha_exp" ] && fecha_exp="OK"
                 estado_cert="✔ VÁLIDO (exp: $fecha_exp)"
                 color="$VERDE"
             else
@@ -504,6 +511,7 @@ resumen_ssl_linux() {
             estado_cert="⚠ FALLÓ AL CONFIGURAR"
             color="$ROJO"
         elif [ "$ssl_activo" == "NO" ]; then
+            if [ "$p_http" != "--" ]; then url="http://${dominio}:${p_http}"; fi
             estado_cert="— Sin SSL (solo HTTP)"
             color="$AMARILLO"
         else
@@ -511,32 +519,29 @@ resumen_ssl_linux() {
             color="$RESET"
         fi
 
-        printf "${color}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
-            "$motor" "$p_http" "$p_ssl" "$ssl_activo" "$estado_cert"
+        printf "${color}%-10s %-8s %-8s %-8s %-34s ${CIAN}%s${RESET}\n" \
+            "$motor" "$p_http" "$p_ssl" "$ssl_activo" "$estado_cert" "$url"
     done
 
     # FTPS
     echo ""
-    printf "${AMARILLO}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
-        "VSFTPD" "21" "21(TLS)" "--" "ESTADO FTPS"
-    echo "-------------------------------------------------------------------"
+    printf "${AMARILLO}%-10s %-8s %-8s %-8s %-34s %s${RESET}\n" \
+        "VSFTPD" "21" "21(TLS)" "--" "ESTADO FTPS" "ENLACE DIRECTO"
+    echo "--------------------------------------------------------------------------------------"
     if grep -q "^ssl_enable=YES" /etc/vsftpd.conf 2>/dev/null; then
-        printf "${VERDE}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
-            "VSFTPD" "21" "21" "SI" "✔ FTPS (TLS Explícito) ACTIVO"
+        printf "${VERDE}%-10s %-8s %-8s %-8s %-34s ${CIAN}%s${RESET}\n" \
+            "VSFTPD" "21" "21" "SI" "✔ FTPS (TLS Explícito) ACTIVO" "ftps://${dominio}:21"
     else
-        printf "${AMARILLO}%-10s %-8s %-8s %-8s %-30s${RESET}\n" \
-            "VSFTPD" "21" "--" "NO" "— SSL no activado en vsftpd"
+        printf "${AMARILLO}%-10s %-8s %-8s %-8s %-34s ${CIAN}%s${RESET}\n" \
+            "VSFTPD" "21" "--" "NO" "— SSL no activado" "ftp://${dominio}:21"
     fi
 
     echo -e "\n${AZUL}Certificados en $PKI_DIR:${RESET}"
     if [ -d "$PKI_DIR" ]; then
-        ls -1 "$PKI_DIR" 2>/dev/null | while read -r f; do
-            echo "  $f"
-        done
+        ls -1 "$PKI_DIR" 2>/dev/null | while read -r f; do echo "  $f"; done
     else
         echo "  (directorio vacío — ningún certificado generado aún)"
     fi
-
     echo ""
     pausa
 }

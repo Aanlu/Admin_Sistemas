@@ -153,9 +153,11 @@ ftp_verificar_hash() {
 
     echo -e "${CIAN}[*] Descargando checksum SHA256 del servidor...${RESET}"
 
+    local tls_flags=""
+    $FTP_USA_TLS && tls_flags="--ssl-reqd --insecure"
     curl -s --connect-timeout 10 \
         --disable-epsv --ftp-pasv --ftp-skip-pasv-ip \
-        "ftp://$FTP_IP/$ruta_hash_remota" \
+        $tls_flags "ftp://$FTP_IP/$ruta_hash_remota" \
         --user "$FTP_USER:$FTP_PASS" \
         -o "$archivo_hash" 2>/dev/null
 
@@ -408,8 +410,7 @@ ftp_instalar_binario() {
 
     case "$ext" in
         deb)
-            dpkg -i "$archivo" >> "$LOG_FILE" 2>&1
-            apt-get install -f -yq >> "$LOG_FILE" 2>&1
+            apt-get install -yq "$archivo" >> "$LOG_FILE" 2>&1
             ;;
         gz|tgz)
             if [ "$motor" == "tomcat" ]; then
@@ -427,8 +428,7 @@ ftp_instalar_binario() {
                             \( -name "default-jdk*.deb" -o -name "openjdk*.deb" \) \
                             2>/dev/null | head -1)
                         if [ -n "$jdk_deb" ]; then
-                            dpkg -i "$jdk_deb" >> "$LOG_FILE" 2>&1
-                            apt-get install -f -yq >> "$LOG_FILE" 2>&1
+                            apt-get install -yq "$jdk_deb" >> "$LOG_FILE" 2>&1
                         else
                             log_error "Sin JDK y sin internet. Imposible instalar Tomcat."
                             return 1
@@ -482,8 +482,7 @@ EOF
                 echo -e "${CIAN}[*] Desempaquetando bundle offline...${RESET}"
                 local tmp_extract; tmp_extract=$(mktemp -d)
                 tar -xf "$archivo" -C "$tmp_extract"
-                dpkg -i "$tmp_extract"/*.deb >> "$LOG_FILE" 2>&1
-                apt-get install -f -yq      >> "$LOG_FILE" 2>&1
+                apt-get install -yq "$tmp_extract"/*.deb >> "$LOG_FILE" 2>&1
                 rm -rf "$tmp_extract"
             else
                 log_error "Extensión .tar.gz no reconocida para motor '$motor'."
@@ -517,9 +516,6 @@ ftp_preparar_repositorio() {
         "/var/ftp_master/http/Linux/Apache"
         "/var/ftp_master/http/Linux/Nginx"
         "/var/ftp_master/http/Linux/Tomcat"
-        "/var/ftp_master/http/Windows/IIS"
-        "/var/ftp_master/http/Windows/Apache"
-        "/var/ftp_master/http/Windows/Nginx"
     )
 
     echo -e "${CIAN}[1/3] Creando estructura de directorios...${RESET}"
@@ -530,7 +526,7 @@ ftp_preparar_repositorio() {
     done
     log_ok "Estructura creada."
 
-    if confirmar_accion "¿Descargar instaladores Linux (APT + Apache mirrors) y generar SHA256?"; then
+    if confirmar_accion "¿Descargar instaladores Linux y generar SHA256?"; then
         echo -e "\n${CIAN}[2/3] Descargando binarios Linux...${RESET}"
         export DEBIAN_FRONTEND=noninteractive
 
