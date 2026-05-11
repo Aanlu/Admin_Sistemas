@@ -1,0 +1,15 @@
+user nginx;
+worker_processes auto;
+events { worker_connections 1024; }
+http {
+    include /etc/nginx/mime.types;
+    server_tokens off; # Ocultar versión (Hardening)
+    upstream webapp { server webapp_interna:80; }
+    server {
+        listen 80;
+        location / {
+            proxy_pass http://webapp;
+            proxy_set_header Host $host;
+        }
+    }
+}

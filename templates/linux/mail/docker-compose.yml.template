@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:latest
+    container_name: core_mailserver
+    hostname: mail
+    domainname: ${DOMAIN}
+    ports:
+      - "25:25"
+      - "143:143"
+      - "587:587"
+      - "993:993"
+    volumes:
+      - mail_data:/var/mail
+      - mail_state:/var/mail-state
+      - mail_logs:/var/log/mail
+      - ./config:/tmp/docker-mailserver
+    environment:
+      - ENABLE_RSPAMD=1
+      - ENABLE_FAIL2BAN=1
+      - SSL_TYPE=manual
+      - SSL_CERT_PATH=/tmp/docker-mailserver/ssl/mail.${DOMAIN}-cert.pem
+      - SSL_KEY_PATH=/tmp/docker-mailserver/ssl/mail.${DOMAIN}-key.pem
+      - TLS_LEVEL=intermediate
+      - PERMIT_DOCKER=network
+      - LOG_LEVEL=debug
+    networks:
+      - red_correo
+    restart: always
+
+  roundcube_db:
+    image: mariadb:10.5
+    container_name: db_webmail
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASS}
+      - MYSQL_DATABASE=roundcubemail
+      - MYSQL_USER=roundcube
+      - MYSQL_PASSWORD=${ROUNDCUBE_DB_PASS}
+    volumes:
+      - roundcube_data:/var/lib/mysql
+    networks:
+      - red_correo
+    restart: always
+
+  webmail:
+    image: roundcube/roundcubemail:latest
+    container_name: portal_webmail
+    ports:
+      - "80:80"
+    environment:
+      - ROUNDCUBEMAIL_DB_TYPE=mysql
+      - ROUNDCUBEMAIL_DB_HOST=roundcube_db
+      - ROUNDCUBEMAIL_DB_USER=roundcube
+      - ROUNDCUBEMAIL_DB_PASSWORD=${ROUNDCUBE_DB_PASS}
+      - ROUNDCUBEMAIL_DB_NAME=roundcubemail
+      - ROUNDCUBEMAIL_DEFAULT_HOST=tls://mailserver
+      - ROUNDCUBEMAIL_SMTP_SERVER=tls://mailserver
+    depends_on:
+      - roundcube_db
+      - mailserver
+    networks:
+      - red_correo
+    restart: always
+
+networks:
+  red_correo:
+    driver: bridge
+
+volumes:
+  mail_data:
+    name: mail_buzones
+  mail_state:
+    name: mail_estado
+  mail_logs:
+    name: mail_registros
+  roundcube_data:
+    name: db_roundcube_vol
