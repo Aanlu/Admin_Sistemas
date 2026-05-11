@@ -3,29 +3,45 @@ source libs/utils.sh
 
 DIR_DEPLOY="/opt/infra_iac"
 DIR_TEMPLATES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../templates/linux" && pwd)"
+DOCKER_COMPOSE="sudo /usr/local/bin/docker-compose"
+
+verificar_docker_compose() {
+    if ! command -v /usr/local/bin/docker-compose &>/dev/null; then
+        log_info "docker-compose no encontrado. Instalando..."
+        sudo curl -sL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+            -o /usr/local/bin/docker-compose
+        sudo chmod +x /usr/local/bin/docker-compose
+        log_ok "docker-compose instalado: $(/usr/local/bin/docker-compose version --short)"
+    fi
+}
 
 limpiar_y_preparar_entorno() {
+    verificar_docker_compose
     log_info "Fase 0: Limpieza profunda y preparación del entorno..."
     
-    # 1. Bajar stack anterior si existe (evita errores de puertos ocupados por docker-proxy)
+    # 1. Bajar stack de orquestación sin la bandera -v (Protege la base de datos)
     if [ -d "$DIR_DEPLOY" ]; then
-        cd "$DIR_DEPLOY" && sudo docker-compose down -v --remove-orphans >/dev/null 2>&1
+        cd "$DIR_DEPLOY" && $DOCKER_COMPOSE down --remove-orphans >/dev/null 2>&1
     fi
 
-    # 2. Forzar borrado de contenedores zombies y redes que salieron en tu auditoría
+    # 2. Bajar stack de correo (Módulo 12) si existe para robarle el puerto 80
+    if [ -d "/opt/infra_mail" ]; then
+        cd "/opt/infra_mail" && $DOCKER_COMPOSE down --remove-orphans >/dev/null 2>&1
+    fi
+
+    # 3. Forzar borrado de contenedores zombies y redes
     sudo docker rm -f frontend_nginx webapp_interna db_postgres panel_pgadmin >/dev/null 2>&1
     sudo docker network rm infra_iac_red_publica infra_iac_red_datos red_publica red_datos >/dev/null 2>&1
     
-    # 3. Matar cualquier servicio nativo en los puertos
+    # 4. Matar cualquier servicio nativo en los puertos
     sudo systemctl stop apache2 tomcat nginx 2>/dev/null
     sudo fuser -k 80/tcp 8080/tcp 2>/dev/null
     
-    # 4. Recrear directorio limpio
+    # 5. Recrear directorio limpio
     sudo rm -rf "$DIR_DEPLOY" && mkdir -p "$DIR_DEPLOY"
 
-    # 5. Instalar dependencias si no existen
+    # 6. Instalar dependencias si no existen
     instalar_dependencia_silenciosa "docker.io"
-    instalar_dependencia_silenciosa "docker-compose"
     instalar_dependencia_silenciosa "ufw"
 }
 

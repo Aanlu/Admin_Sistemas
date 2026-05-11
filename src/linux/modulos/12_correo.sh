@@ -21,8 +21,16 @@ verificar_docker_compose() {
 limpiar_y_preparar_entorno() {
     verificar_docker_compose
     log_info "Fase 0: Aplicando Idempotencia (Liberando puertos y conflictos)..."
-    if [ -d "/opt/infra_iac" ]; then cd "/opt/infra_iac" && $DOCKER_COMPOSE down -v --remove-orphans >/dev/null 2>&1; fi
-    if [ -d "$DIR_DEPLOY" ]; then cd "$DIR_DEPLOY" && $DOCKER_COMPOSE down -v --remove-orphans >/dev/null 2>&1; fi
+    
+    # Se remueve la bandera -v para proteger la persistencia de correos y BDD
+    if [ -d "/opt/infra_iac" ]; then 
+        cd "/opt/infra_iac" && $DOCKER_COMPOSE down --remove-orphans >/dev/null 2>&1
+    fi
+    
+    if [ -d "$DIR_DEPLOY" ]; then 
+        cd "$DIR_DEPLOY" && $DOCKER_COMPOSE down --remove-orphans >/dev/null 2>&1
+    fi
+    
     sudo docker rm -f core_mailserver db_webmail portal_webmail >/dev/null 2>&1
     sudo fuser -k 80/tcp 443/tcp 25/tcp 143/tcp 587/tcp 993/tcp 2>/dev/null
     sudo rm -rf "$DIR_DEPLOY" && mkdir -p "$DIR_DEPLOY"
